@@ -48,7 +48,8 @@ TAGS=with_gvisor,with_wireguard,with_utls,with_tailscale,ts_omit_logtail,ts_omit
 PROTO="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
 # The engine's packages initialised once on this host, as the phone does when it loads the library: a panic there, or
 # any name clash beyond that known one, stops the build here instead of on a phone.
-out=$(go test -count=1 -v -run '^$' -tags "$TAGS" -ldflags "$PROTO -checklinkname=0" ./experimental/libbox 2>&1) || { echo "$out"; echo "engine init failed"; exit 1; }
+# The environment's own protobuf policy would override the flag: left out.
+out=$(env -u GOLANG_PROTOBUF_REGISTRATION_CONFLICT go test -count=1 -v -run '^$' -tags "$TAGS" -ldflags "$PROTO -checklinkname=0" ./experimental/libbox 2>&1) || { echo "$out"; echo "engine init failed"; exit 1; }
 # Each clash warning must be the known one, with both its origin lines, word for word. protobuf-go writes a plain or a
 # no-break space after "proto:" by a hash of the binary (so nobody matches its texts): both count as a space here.
 INIT_OUT="$out" python3 - <<'PY'
