@@ -217,6 +217,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
         private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+        private val forgetting = java.util.concurrent.atomic.AtomicBoolean()
+        /** Removes a pause note that wouldn't go every 30 s, one loop at a time, until it goes or a new pause replaces it. */
+        private fun retryForget(ctx: Context) {
+            if (!forgetting.compareAndSet(false, true)) return
+            bg.launch {
+                while (!PauseNote.retry(ctx)) kotlinx.coroutines.delay(30_000)
+                ctx.getSystemService(NotificationManager::class.java).cancel(6)
+                forgetting.set(false)
+                if (PauseNote.stuck) retryForget(ctx) // stuck again before the flag dropped: that call left it to this loop
+            }
+        }
+
         private var engineReady = false
 
         /**
@@ -385,6 +397,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
+                // Android restarted the service it ended while paused (no command): the pause goes on until its own end.
+                if (intent == null) PauseNote.left(this)?.let { (wake, at) -> paused(wake, at, isLockdownEnabled, isAlwaysOn); return }
                 connect(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true)
             }
         }
@@ -1180,25 +1194,45 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     private fun cancelResume() {
         resume?.cancel(); resume = null
+        if (!PauseNote.forget(this)) {
+            Log.e(TAG, "pause: note not removed")
+            problem(this, "$APP couldn't clear the pause it saved: if Android restarts it, it may pause again. It keeps trying.", "Pause not cleared", 6)
+            retryForget(applicationContext)
+        }
         getSystemService(AlarmManager::class.java).cancel(resumeIntent)
     }
 
     /** Traffic leaves without the VPN until resumed, by hand or after [minutes]. Caller holds [lock]. */
     private fun pause(minutes: Int) {
         if (state.value.phase != VpnState.Phase.On) return
+        // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike.
+        val wake = if (minutes > 0) SystemClock.elapsedRealtime() + minutes * 60_000L else 0L
+        val at = System.currentTimeMillis()
+        // Noted before the engine stops: a pause a restart by Android couldn't find would connect early, so none starts.
+        if (!PauseNote.note(this, wake, at)) {
+            Log.w(TAG, "pause: not noted")
+            problem(this, "$APP couldn't save the pause, so it stays connected. Try again.", "Not paused", 6)
+            return
+        }
         AfterUpdate.off(this) // paused by the user: an update never turns it back on
         // Read now: what the pause notice promises (apps offline or not) depends on them.
         val lockdown = isLockdownEnabled
         val alwaysOn = isAlwaysOn
         stopEngine()
         stopWanted = false
+        paused(wake, at, lockdown, alwaysOn)
+    }
+
+    /**
+     * Paused until [wake] on the elapsed clock (0: until resumed), since [at]: the timed resume, the notice and the state;
+     * also when Android restarted the service ended while paused ([PauseNote]). Caller holds [lock].
+     */
+    private fun paused(wake: Long, at: Long, lockdown: Boolean, alwaysOn: Boolean) {
         val pause = ++pauses
-        val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L
+        val until = if (wake > 0) System.currentTimeMillis() + (wake - SystemClock.elapsedRealtime()) else 0L
         // Short steps against the elapsed clock: a single delay doesn't count while the phone sleeps.
         var exact = true
-        if (until > 0) {
-            // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike.
-            val wake = SystemClock.elapsedRealtime() + minutes * 60_000L
+        if (wake > 0) {
             resume = scope.launch {
                 while (SystemClock.elapsedRealtime() < wake) kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
                 lock.withLock { if (state.value.phase == VpnState.Phase.Paused && pauses == pause) connect() }
@@ -1209,10 +1243,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             exact = am.canScheduleExactAlarms() && runCatching { am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent) }.isSuccess
             if (!exact) am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent)
         }
-        val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
-        getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $at" else "Paused until about $at", paused = true))
+        val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
+        getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $time" else "Paused until about $time", paused = true))
         // Last: whoever sees Paused (a resume refused for lack of consent) finds the alarm and notice to cancel.
-        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
+        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = at, pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
     }
 
     override fun onRevoke() = stoppedOutside("Android turned off $APP's VPN: another VPN app took over, or it was disconnected in Android's settings.")
