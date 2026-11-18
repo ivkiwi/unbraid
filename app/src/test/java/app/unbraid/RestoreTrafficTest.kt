@@ -317,6 +317,16 @@ class RestoreTrafficTest {
             notes(mullvad, mullvad.copy(opts = mapOf("mullvad" to mapOf("protect" to "on")))))
     }
 
+    /** A Tailscale or NetBird exit route that keeps its id but exits through another device: the same tunnel either way, so said apart. */
+    @Test fun aMeshExitMovedToAnotherDeviceIsSaid() {
+        fun moved(r: Route, to: Route) = base.copy(routes = base.routes + r, apps = mapOf("org.a" to r.id)).let { notes(it, it.copy(routes = base.routes + to)) }
+        val ts = Route("t", tsExit = "100.101.102.103", tsName = "nas")
+        assertTrue(moved(ts, ts.copy(tsExit = "100.101.102.104", tsName = "box")).contains("\"box\" exits through another Tailscale device: box instead of nas."))
+        val nb = Route("n", nbExit = "exit-home", nbName = "nas")
+        assertTrue(moved(nb, nb.copy(nbExit = "exit-office", nbName = "office")).contains("\"office\" exits through another NetBird device: office instead of nas."))
+        assertTrue(moved(nb, nb).none { "exits through" in it })
+    }
+
     @Test fun aSetupThatCanNotBeCompiledIsSaidSo() {
         val two = base.copy(routes = base.routes + Route("t1", tsExit = "100.64.0.1") + Route("t2", tsExit = "100.64.0.2"), apps = mapOf("org.a" to "t1", "org.b" to "t2"))
         assertEquals(listOf(RestoreTraffic.UNKNOWN), notes(two, base))

@@ -634,6 +634,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         lastGood = json
     }
 
+    /** The engine runs a NetBird account signed out of or replaced since ([FakePool.restoreInput] leaves it out). Caller holds [lock]. */
+    private fun staleNb() = lastInput?.setup?.let { it.netbird && it.home.nbAccount != store.setup.value.home.nbAccount } == true
+
     private var pool: Job? = null
     /** Said once per block: lookups of new names fail until the next move. */
     private var exhaustedSaid = false
@@ -661,7 +664,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
                     FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true) }) {
                         FakePool.Outcome.Ran -> { exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime() }
-                        FakePool.Outcome.Kept -> Log.w(TAG, "fake IPs: move not started, tried again at the next check")
+                        // Kept as it runs, unless that is a NetBird account signed out of or replaced since: as in [install].
+                        FakePool.Outcome.Kept -> if (staleNb()) teardown("Connection lost") else Log.w(TAG, "fake IPs: move not started, tried again at the next check")
                         FakePool.Outcome.Failed -> teardown("Connection lost")
                     }
                 }
@@ -736,8 +740,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val restarted = restarting
         // An engine still running a NetBird account signed out of or replaced since must not stay as it is: the last
         // good config comes back without that account ([FakePool.restoreInput]), else the VPN stops.
-        val staleNb = lastInput?.setup?.let { it.netbird && it.home.nbAccount != store.setup.value.home.nbAccount } == true
-        val restored = (!restarted && !staleNb) || restoreLastGood(srv, gone = restarted) == FakePool.Outcome.Ran
+        val restored = (!restarted && !staleNb()) || restoreLastGood(srv, gone = restarted) == FakePool.Outcome.Ran
         restarting = false
         // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
         // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change

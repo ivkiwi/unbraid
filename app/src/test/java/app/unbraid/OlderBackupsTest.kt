@@ -3,6 +3,7 @@ package app.unbraid
 import app.unbraid.data.Backup
 import app.unbraid.data.OwnServer
 import app.unbraid.data.Setup
+import app.unbraid.data.VERSION
 import app.unbraid.data.refilled
 import app.unbraid.data.restoredFrom
 import kotlinx.serialization.json.Json
@@ -90,7 +91,9 @@ class OlderBackupsTest {
             val opened = runCatching { Backup.read(files[c.getValue("file").jsonPrimitive.int]) }.getOrElse { failed += "$name: refused (${it.message})"; continue }
             val got = phone.restoredFrom(opened.setup, c.str("keepAs"), now, opened.keys) ?: run { failed += "$name: no room"; continue }
             val was = json.decodeFromJsonElement(Setup.serializer(), c.getValue("expected"))
-            val expected = intended(was, opened.setup, phone).also { if (it != was) refilled++ }
+            // These were recorded with format 3; a restore always gives the current one, which only a NetBird route changes when saved.
+            val expected = intended(was, opened.setup, phone).also { if (it != was) refilled++ }.copy(version = VERSION)
+            if (got.version != VERSION) failed += "$name: restored as version ${got.version}"
             val known = (opened.setup.routes + phone.routes).map { it.id }.toSet() + (opened.setup.servers + phone.servers).map { it.id }
             if (plain(shared(expected, was, known), known) != plain(got, known)) failed += "$name: restores to another setup"
         }
