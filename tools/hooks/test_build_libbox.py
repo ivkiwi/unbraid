@@ -89,15 +89,25 @@ class Helpers(unittest.TestCase):
         return self.run_script(STUB_TEST_OUT=p, STUB_TEST_EXIT=str(code))
 
     def test_known_clash_goes_on_to_bind(self):
-        r = self.init_check(self.KNOWN)
-        self.assertNotIn("protobuf name clash", r.stdout)
-        self.assertTrue(os.path.exists(self.log), "bind must run")
+        # protobuf-go writes a plain or a no-break space after "proto:", by a hash of the binary.
+        for out in (self.KNOWN, self.KNOWN.replace("proto: ", "proto: ")):
+            if os.path.exists(self.log):
+                os.remove(self.log)
+            r = self.init_check(out)
+            self.assertNotIn("protobuf name clash", r.stdout)
+            self.assertTrue(os.path.exists(self.log), "bind must run")
 
     def test_any_other_clash_stops_before_bind(self):
         for extra in ('WARNING: proto: file "daemon/started_service.proto" has a name conflict over daemon.Version\n',
                       'WARNING: proto: message daemon.Version is already registered\n',
                       'WARNING: proto: file "other.proto" has a name conflict over daemon.LogLevel\n',
-                      '\tpreviously from: "example.com/other/proto"\n'):
+                      '\tpreviously from: "example.com/other/proto"\n',
+                      # a known name, but without the origin lines protobuf-go leaves out for an unknown package
+                      'WARNING: proto: enum daemon.LogLevel is already registered\n',
+                      # a known name from another pair of packages
+                      'WARNING: proto: enum daemon.LogLevel is already registered\n'
+                      '\tpreviously from: "example.com/other/proto"\n'
+                      '\tcurrently from:  "github.com/sagernet/sing-box/daemon"\n'):
             r = self.init_check(self.KNOWN + extra)
             self.assertIn("a new protobuf name clash", r.stdout, extra)
             self.assertFalse(os.path.exists(self.log), "bind must not run")

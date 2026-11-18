@@ -49,12 +49,30 @@ PROTO="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
 # The engine's packages initialised once on this host, as the phone does when it loads the library: a panic there, or
 # any name clash beyond that known one, stops the build here instead of on a phone.
 out=$(go test -count=1 -v -run '^$' -tags "$TAGS" -ldflags "$PROTO -checklinkname=0" ./experimental/libbox 2>&1) || { echo "$out"; echo "engine init failed"; exit 1; }
-# Every line of every clash warning must be one of the known clash's own lines, word for word.
-KNOWN="WARNING: proto: enum daemon.LogLevel is already registered
-$(printf '\tpreviously from: "github.com/netbirdio/netbird/client/proto"\n\tcurrently from:  "github.com/sagernet/sing-box/daemon"')
-$(for n in LogLevel TRACE DEBUG INFO WARN ERROR FATAL PANIC; do echo "WARNING: proto: file \"daemon/started_service.proto\" has a name conflict over daemon.$n"; done)"
-clash=$(grep -E '^WARNING: proto:|^[[:space:]]+(previously|currently) from:' <<<"$out" | grep -vxF "$KNOWN" || true)
-[ -z "$clash" ] || { echo "$clash"; echo "a new protobuf name clash"; exit 1; }
+# Each clash warning must be the known one, with both its origin lines, word for word. protobuf-go writes a plain or a
+# no-break space after "proto:" by a hash of the binary (so nobody matches its texts): both count as a space here.
+INIT_OUT="$out" python3 - <<'PY'
+import os, re, sys
+lines = os.environ["INIT_OUT"].replace("\u00a0", " ").splitlines()
+origin = ['\tpreviously from: "github.com/netbirdio/netbird/client/proto"', '\tcurrently from:  "github.com/sagernet/sing-box/daemon"']
+known = {'WARNING: proto: file "daemon/started_service.proto" has a name conflict over daemon.' + n
+         for n in ("LogLevel", "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "PANIC")}
+known.add("WARNING: proto: enum daemon.LogLevel is already registered")
+bad, i = [], 0
+while i < len(lines):
+    l = lines[i]
+    if l.startswith("WARNING: proto:"):
+        if l not in known or lines[i + 1:i + 3] != origin:
+            bad.append(l)
+        i += 3 if lines[i + 1:i + 3] == origin else 1
+        continue
+    if re.match(r"\s+(previously|currently) from:", l):
+        bad.append(l)  # an origin line without its warning
+    i += 1
+if bad:
+    print("\n".join(bad) + "\na new protobuf name clash")
+    sys.exit(1)
+PY
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
 "$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
