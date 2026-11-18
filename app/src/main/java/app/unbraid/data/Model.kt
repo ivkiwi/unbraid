@@ -61,8 +61,8 @@ data class OvpnProfile(val name: String, val config: String, val username: Strin
 data class SsProfile(val name: String, val server: String, val port: Int, val method: String, val password: String, val plugin: String? = null, val pluginOpts: String? = null)
 
 /**
- * One exit. Exactly one source: a provider [loc], an imported [wg]/[ovpn]/[ss] server, or [tsExit] — a Tailscale
- * exit node (name or 100.x address) reached through the built-in Tailscale client.
+ * One exit. Exactly one source: a provider [loc], an imported [wg]/[ovpn]/[ss] server, [tsExit] — a Tailscale
+ * exit node (name or 100.x address) reached through the built-in Tailscale client — or [nbExit], a NetBird exit node.
  */
 @Serializable
 data class Route(
@@ -74,6 +74,10 @@ data class Route(
     val tsExit: String? = null,
     /** Display name of the [tsExit] node; [tsExit] itself holds its tailnet IP so similarly named nodes can't be confused. */
     val tsName: String? = null,
+    /** A NetBird exit node by its network ID, reached through the built-in NetBird client. */
+    val nbExit: String? = null,
+    /** Display name of the [nbExit] node (its routing peer). */
+    val nbName: String? = null,
     val hue: Int = 0,
     /**
      * The provider's own blocking (NordVPN Threat Protection Lite, IVPN AntiTracker…) for this route only: null follows
@@ -87,19 +91,21 @@ data class Route(
     /** Restored from a backup saved without keys: blocked until its own server gets its config again ([OwnServer.keyless]). */
     val keyless: Boolean = false,
 ) {
-    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
-    val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
+    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: nbName ?: nbExit ?: loc.country ?: "Fastest"
+    val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; nbExit != null -> "NB"; else -> loc.code }
     /** Not tied to a provider account. */
-    val imported get() = wg != null || ovpn != null || ss != null || tsExit != null
+    val imported get() = wg != null || ovpn != null || ss != null || tsExit != null || nbExit != null
+    /** An exit node of the built-in Tailscale or NetBird client: no tunnel or keys of its own. */
+    val meshExit get() = tsExit != null || nbExit != null
     val checksInternet: Boolean get() = when {
-        tsExit != null || !imported -> false
+        meshExit || !imported -> false
         checkInternet != null -> checkInternet
         ss != null -> true
         wg != null -> wg.allowedIps.any { it == "0.0.0.0/0" || it == "::/0" }
         else -> ovpn?.config?.lineSequence()?.any { it.trim().startsWith("redirect-gateway", ignoreCase = true) } == true
     }
     /** Who carries this route: the provider, or the kind of own server. */
-    val source get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; ss != null -> "Shadowsocks"; tsExit != null -> "Tailscale"; else -> Providers.short(loc.provider) }
+    val source get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; ss != null -> "Shadowsocks"; tsExit != null -> "Tailscale"; nbExit != null -> "NetBird"; else -> Providers.short(loc.provider) }
 }
 
 @Serializable
@@ -113,7 +119,27 @@ data class Home(
     val wg: WgPeer? = null,
     /** A Headscale server's DNS suffix the user allowed to answer every app's lookups under it; Tailscale's own needs none. */
     val tsSuffixAllowed: String? = null,
-)
+    /** NetBird's peers and routed networks for every app; its exit nodes need sign-in only ([netbirdReady]). */
+    val netbird: Boolean = false,
+    /** NetBird management server (https://), self-hosted or NetBird's own. */
+    val nbManagementUrl: String? = null,
+    /**
+     * NetBird setup key: registers this device when its management server doesn't know it yet. Erased once NetBird ran
+     * with it ([app.unbraid.vpn.UnbraidVpn]): from then on the device key alone signs in.
+     */
+    val nbSetupKey: String? = null,
+    /**
+     * This device's NetBird WireGuard key, made on the phone ([WgKeys]). Kept here, sealed with the rest of the setup and
+     * never in a backup, so NetBird itself keeps nothing on disk.
+     */
+    val nbPrivateKey: String? = null,
+) {
+    /** NetBird can start: a management server and this device's key are set (a setup key only until it is registered). */
+    val netbirdReady get() = nbManagementUrl != null && nbPrivateKey != null
+    /** Which NetBird account (server and device) this is, without the key itself; null when signed out. */
+    val nbAccount get() = if (!netbirdReady) null else java.security.MessageDigest.getInstance("SHA-256")
+        .digest("$nbManagementUrl\n$nbPrivateKey".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+}
 
 @Serializable
 data class Prefs(
@@ -151,7 +177,7 @@ fun WgPeer.withoutSecrets() = copy(privateKey = "", presharedKey = null)
 fun OvpnProfile.withoutSecrets() = OvpnProfile(name, "")
 fun SsProfile.withoutSecrets() = copy(password = "", pluginOpts = null)
 fun OwnServer.withoutSecrets() = copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
-fun Route.withoutSecrets() = if (!imported || tsExit != null) this else copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
+fun Route.withoutSecrets() = if (!imported || meshExit) this else copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
 
 /**
  * A saved setup: a default exit and the apps' chosen routes. An app with an entry in [apps] chose that route, also when it
@@ -198,8 +224,9 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
 /**
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
+ * 4: NetBird exit routes, which an older build would take for provider routes; only a setup that has one is saved as 4.
  */
-const val VERSION = 3
+const val VERSION = 4
 
 @Serializable
 data class Setup(
@@ -439,8 +466,12 @@ data class Setup(
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
     val tailscale get() = home.tailscale || tsExit != null
+    /** The NetBird exit node in use, if any active route goes out through one (NetBird uses one at a time). */
+    val nbExit get() = activeRoutes.firstNotNullOfOrNull { it.nbExit }
+    /** NetBird runs for its peers and networks or for an exit-node route, once it can sign in. */
+    val netbird get() = (home.netbird || nbExit != null) && home.netbirdReady
     /** Nothing goes through a VPN (Direct default, no app on a route, no home tunnel): running protects nothing. */
-    val directOnly get() = defaultRoute == DIRECT && (apps.values + Sites.applied(this).values).all { it == DIRECT } && home.wg == null && !home.tailscale
+    val directOnly get() = defaultRoute == DIRECT && (apps.values + Sites.applied(this).values).all { it == DIRECT } && home.wg == null && !home.tailscale && !home.netbird
 
     /** Website [site] (as [Sites.clean] gives it) on route [routeId], or with no route of its own (null), in profile [name] ([editing]). */
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
@@ -449,7 +480,12 @@ data class Setup(
      * As saved: format 3 only with a website route or a Block somewhere, so a setup without either still opens in a build
      * from before them (which would drop the websites, and take a blocked app for one on a route that is gone).
      */
-    val stamped get() = copy(version = if ((profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values }) minOf(version, 2) else VERSION)
+    // The lowest version that reads it right: an app older than NetBird routes would take one for a provider route.
+    val stamped get() = copy(version = when {
+        routes.any { it.nbExit != null } -> VERSION
+        (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
+        else -> 3
+    })
 
     /** [provider]'s page setting [key], or its default. */
     fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]

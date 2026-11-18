@@ -56,12 +56,13 @@ import androidx.compose.ui.unit.sp
 /** Android 17 blocks Unbraid's own LAN traffic without it, so Tailscale would only reach home through a slow relay. */
 const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
 
-fun Context.needsLocalNetwork(setup: app.unbraid.data.Setup, lockdownLan: Boolean = false) = (setup.tailscale || setup.home.wg != null || lockdownLan || setup.routes.any { it.onLan() }) &&
+fun Context.needsLocalNetwork(setup: app.unbraid.data.Setup, lockdownLan: Boolean = false) = (setup.tailscale || setup.netbird || setup.home.wg != null || lockdownLan || setup.routes.any { it.onLan() }) &&
     android.os.Build.VERSION.SDK_INT >= 37 && checkSelfPermission(LOCAL_NETWORK) != android.content.pm.PackageManager.PERMISSION_GRANTED
 
 /** Why [LOCAL_NETWORK] is needed, for the setting that offers it and the question asked after a connect. */
 fun nearbyReason(setup: app.unbraid.data.Setup, lockdownLan: Boolean) = when {
     setup.tailscale -> "Lets Tailscale reach devices on this network directly, not through a slower relay."
+    setup.netbird -> "Lets NetBird reach its server and devices on this network directly, not through a slower relay."
     setup.home.wg != null -> "Needed to reach a home tunnel on this network."
     lockdownLan -> "Printers, casting and NAS need it while Block connections without VPN is on."
     else -> "Needed to reach your own server on this network."

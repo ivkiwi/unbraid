@@ -321,7 +321,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         // The old Tailscale sign-in first: if it stays, nothing else goes and the mark stays.
         if (!File(dir, "tailscale").deleteRecursively()) return false
         listOf(SETUP, ACCOUNTS, RELEASES, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "expiry",
-            "setup.bin.bad", "accounts.bin.bad", "links.bin.bad", RELEASES_BAD, SIGN_INS).forEach { File(dir, it).delete() }
+            "setup.bin.bad", "accounts.bin.bad", "links.bin.bad", RELEASES_BAD, SIGN_INS, NB_MAP).forEach { File(dir, it).delete() }
         // The domain table only when no engine has it open (one keeping apps offline meanwhile): that engine deletes it
         // once it has stopped, so a new table never starts in the same block.
         app.unbraid.vpn.LookupTable.forget(dir)
@@ -391,6 +391,17 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
             check(seal(TS_STATE, v)) { "Tailscale state not saved" }; File(dir, TS_PLAIN).delete()
         }
 
+    /**
+     * NetBird's last status while running (networks, peer names, exit nodes), so the next start routes its networks
+     * from the first packet. Sealed; dropped on sign-out and on a change of account.
+     */
+    fun nbMap(account: String?): String? = account?.let { a -> runCatching { open(NB_MAP) }.getOrNull()?.takeIf { it.startsWith("$a\n") }?.substringAfter('\n') }
+
+    /** Keeps [status] as [account]'s map; false if it wasn't written. */
+    fun saveNbMap(account: String, status: String) = safely { seal(NB_MAP, "$account\n$status") }.also { if (!it) Log.w("Unbraid", "store: NetBird map not saved") }
+
+    fun dropNbMap() { File(dir, NB_MAP).delete() }
+
     /** A Tailscale node is kept on this phone (sealed or from an older version), signed in or not. No decryption. */
     val tsStored get() = File(dir, TS_STATE).exists() || File(dir, TS_PLAIN).exists()
 
@@ -435,7 +446,9 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         _accounts.value.keys.toList().forEach { account(it, null) }
         // Written once more: a removal above whose save failed must not bring that account back after a restart.
         _accounts.value = emptyMap(); saveAccounts()
-        update { it.copy(home = it.home.copy(tsAuthKey = null)) }
+        // NetBird's identity too: after signing out of everything nothing signs this phone in again.
+        update { it.copy(home = it.home.copy(tsAuthKey = null, netbird = false, nbManagementUrl = null, nbSetupKey = null, nbPrivateKey = null)) }
+        File(dir, NB_MAP).delete()
         File(dir, "expiry").delete() // left by older versions
         tsSuffix = null
         // Copies older versions kept of files that failed to open hold accounts and keys too.
@@ -497,6 +510,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         const val SIGN_INS = "signins.json"
         const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
+        const val NB_MAP = "netbird.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"
         val countriesSer = ListSerializer(Country.serializer())
         val linksSer = MapSerializer(String.serializer(), Link.serializer())

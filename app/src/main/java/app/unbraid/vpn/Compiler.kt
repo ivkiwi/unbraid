@@ -11,6 +11,7 @@ import app.unbraid.data.Manual
 import app.unbraid.data.OvpnLink
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
+import app.unbraid.data.NbLink
 import app.unbraid.data.validWgKey
 import app.unbraid.data.WgLink
 import app.unbraid.data.Route
@@ -38,6 +39,7 @@ object Compiler {
     const val NORD_DNS = "103.86.96.100"
     const val NORD_TP = "103.86.96.108"
     const val TS_TAG = "home-ts"
+    const val NB_TAG = "home-nb"
     /** Apps set to Direct that pass through unbraid for its filter, as one group of app rules. */
     private const val FILTERED = "direct+filter"
     private val LAN = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32")
@@ -80,6 +82,10 @@ object Compiler {
          * refuses the whole id, as the blocked app's rule matches any app of it.
          */
         val blockedKin: Set<String> = emptySet(),
+        /** NetBird's network (100.x.0.0/16) and the networks behind its routing peers, as it reports them. */
+        val nbNetworks: List<String> = emptyList(),
+        /** NetBird's peers' DNS names ("nas.netbird.cloud"), answered by its DNS server only by exact name. */
+        val nbNames: List<String> = emptyList(),
     )
 
     /**
@@ -92,7 +98,7 @@ object Compiler {
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
     fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
         val owners = HashMap<String, String>()
-        val routes = s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }
+        val routes = s.activeRoutes.filter { !it.meshExit && it.id !in blocked }
         require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
         return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
@@ -131,10 +137,11 @@ object Compiler {
         val active = s.activeRoutes.filter { it.id !in i.blocked }
         val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
+        require(active.mapNotNull { it.nbExit }.distinct().size <= 1) { "NetBird uses one exit node at a time. Use the same node for every NetBird route." }
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
         val shared = shared(s, i.links, i.blocked)
-        val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
+        val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else if (s.route(id)?.nbExit != null) NB_TAG else shared[id] ?: "r-$id" }
         val tsDomains = tsDomains(s.home, i.tsSuffix)
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
         // (Threat Protection) resolvers through the tunnel.
@@ -149,8 +156,14 @@ object Compiler {
         val ts = s.tailscale
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
+        // The same for NetBird: its peers and routed networks for every app only with the home toggle on.
+        val nb = s.netbird
+        val homeNb = nb && s.home.netbird
+        val (nbNets, nbNames) = if (homeNb) nbUsed(i.nbNetworks, i.nbNames) else emptyList<String>() to emptyList<String>()
         // A filter that lives in a home network is asked through that tunnel, as any connection to its address goes.
-        val filterVia = filter?.let { homeVia(s, it, tsDomains) }
+        val filterVia = filter?.let { homeVia(s, it, tsDomains, nbNets, nbNames) }
+        // A filter reached by name through a home tunnel is looked up with that tunnel's own DNS.
+        val viaBoot = if (filterVia == NB_TAG) "dns-netbird" else "dns-tailnet"
         // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
         val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
         // A filter reached by name, on an imported OpenVPN route, is looked up with that tunnel's pushed DNS (it may only be known there).
@@ -163,7 +176,7 @@ object Compiler {
         val defaultDns = if (directFiltered && !defaultBlocked) "dns-filter" else if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
-            .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
+            .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (nb) putIfAbsent(NB_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
         // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
             .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
@@ -172,6 +185,8 @@ object Compiler {
         // only get a real address there.
         val network = buildList {
             homeWg?.let { w -> homeCidrs(w).takeIf { it.isNotEmpty() }?.let { add(obj("ip_cidr" to JsonArray(it.map(::JsonPrimitive)), "outbound" to "home-wg")) } }
+            // Before the tailnet: NetBird's network is a part of the same 100.64.0.0/10.
+            if (nbNets.isNotEmpty()) add(obj("ip_cidr" to JsonArray(nbNets.map(::JsonPrimitive)), "outbound" to NB_TAG))
             if (homeTs) add(obj("ip_cidr" to JsonArray((listOf(TAILNET) + homeSubnets(s)).map(::JsonPrimitive)), "outbound" to TS_TAG))
             if (s.prefs.lan) add(obj("ip_cidr" to JsonArray(LAN.map(::JsonPrimitive)), "outbound" to "direct"))
         }
@@ -200,7 +215,7 @@ object Compiler {
                     active.filter { !ovpnDns(it.id) }.forEach { r ->
                         val boot = "boot-${tag(r.id)}"
                         val own = obj("type" to if (tcpOnly(r.id)) "tcp" else "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
-                        if (filter == null || !filterRoutes) add(own) else if (filterVia != null) add(filterDns(filter, "dns-r-${r.id}", filterVia, "dns-tailnet")) else {
+                        if (filter == null || !filterRoutes) add(own) else if (filterVia != null) add(filterDns(filter, "dns-r-${r.id}", filterVia, viaBoot)) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
                             if (Filters.byName(filter) && boots.add(boot)) add(
                                 if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
@@ -210,17 +225,20 @@ object Compiler {
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
-                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", filterVia ?: "direct", if (filterVia != null) "dns-tailnet" else "local"))
+                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", filterVia ?: "direct", if (filterVia != null) viaBoot else "local"))
                     active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
                         // A server that pushes no DNS at all is answered by Quad9 through the same tunnel (an engine patch).
                         add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
                     }
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
+                    if (nbNames.isNotEmpty()) add(obj("type" to "netbird", "tag" to "dns-netbird", "endpoint" to NB_TAG))
                 }
                 putJsonArray("rules") {
                     // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone.
                     if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
                     for ((id, names) in sites) if (id == BLOCK) add(obj(*names, "action" to "reject"))
+                    // Exact names only: a self-hosted NetBird may use any domain, and its server answers nothing but its peers.
+                    if (nbNames.isNotEmpty()) add(obj("domain" to arr(*nbNames.toTypedArray()), "server" to "dns-netbird"))
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
@@ -264,7 +282,7 @@ object Compiler {
                     if (s.prefs.lan && !i.lockdown && (barred.isEmpty() || !s.prefs.blockLan)) {
                         // LAN never enters the tunnel: Android sends it straight to Wi-Fi. Home subnets reached
                         // through a tunnel stay routed, because the more specific route wins.
-                        val home = (if (homeTs) homeSubnets(s) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())
+                        val home = (if (homeTs) homeSubnets(s) else emptyList()) + nbNets + (homeWg?.let(::homeCidrs) ?: emptyList())
                         put("route_address", JsonArray((listOf("0.0.0.0/0") + home).map(::JsonPrimitive)))
                         // Android applies exclusions after inclusions, so an exclusion equal to a home prefix would win.
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
@@ -286,7 +304,7 @@ object Compiler {
                         is WgLink -> add(wg(tag(r.id), l.peer, r.name))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
                         is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
-                        is SsLink, is TsLink -> Unit
+                        is SsLink, is TsLink, is NbLink -> Unit
                     }
                 }
                 homeWg?.let { add(wg("home-wg", it.copy(mtu = minOf(it.mtu, app.unbraid.data.MTU_MIN)), "the home network")) }
@@ -300,6 +318,19 @@ object Compiler {
                     s.home.tsControlUrl?.let { require(it.startsWith("https://")) { "Headscale needs an https:// address. Change it in Settings." }; put("control_url", it) }
                     s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
                 })
+                if (nb) add(buildJsonObject {
+                    put("type", "netbird"); put("tag", NB_TAG)
+                    val url = s.home.nbManagementUrl!!
+                    // Over plain HTTP a network attacker could act as the management server and hand out the network.
+                    require(url.startsWith("https://")) { "NetBird needs an https:// management address. Change it in Settings." }
+                    put("management_url", url)
+                    s.home.nbSetupKey?.let { put("setup_key", it) }
+                    // Checked here so the engine's error for a bad key can't quote it.
+                    require(validWgKey(s.home.nbPrivateKey!!)) { "Invalid NetBird key. Sign out of NetBird in Settings and sign in again." }
+                    put("private_key", s.home.nbPrivateKey)
+                    put("hostname", "unbraid")
+                    s.nbExit?.let { put("exit_node", it) }
+                })
             }
             putJsonArray("outbounds") {
                 add(obj("type" to "direct", "tag" to "direct"))
@@ -312,7 +343,7 @@ object Compiler {
                     // The tunnels carry the phone's own connections and their replies, never new ones a server or peer
                     // opens: those would reach the phone, its network and the home network through another route.
                     val tunnels = active.filter { shared[it.id] == "r-${it.id}" && (i.links[it.id] is WgLink || i.links[it.id] is OvpnLink) }.map { tag(it.id) } +
-                        listOfNotNull("home-wg".takeIf { homeWg != null }, TS_TAG.takeIf { ts })
+                        listOfNotNull("home-wg".takeIf { homeWg != null }, TS_TAG.takeIf { ts }, NB_TAG.takeIf { nb })
                     if (tunnels.isNotEmpty()) add(obj("inbound" to JsonArray(tunnels.map(::JsonPrimitive)), "action" to "reject"))
                     // An app on Block gets nothing, on any route: before its lookups are taken over, the home network, the LAN, a
                     // website's route and its own.
@@ -437,12 +468,15 @@ object Compiler {
     }
 
     /**
-     * The home tunnel that reaches DNS server [d], or null when it is out on the internet: the home WireGuard tunnel or
-     * the tailnet for an address inside it, the tailnet for a name its DNS answers ([tsDomains]). The same order as for
-     * an app's connection to that address. The local network is left out: there the address is whoever holds it.
+     * The home tunnel that reaches DNS server [d], or null when it is out on the internet: the home WireGuard tunnel,
+     * NetBird or the tailnet for an address inside it, NetBird or the tailnet for a name their DNS answers ([nbNames],
+     * [tsDomains]). The same order as for an app's connection to that address. The local network is left out: there
+     * the address is whoever holds it.
      */
-    fun homeVia(s: Setup, d: Filters.Dns, tsDomains: List<String> = listOfNotNull(if (officialTs(s.home)) "ts.net" else s.home.tsSuffixAllowed)): String? = when {
+    fun homeVia(s: Setup, d: Filters.Dns, tsDomains: List<String> = listOfNotNull(if (officialTs(s.home)) "ts.net" else s.home.tsSuffixAllowed),
+                nbNets: List<String> = emptyList(), nbNames: List<String> = emptyList()): String? = when {
         s.home.wg?.let(::homeCidrs).orEmpty().any { within(d.ip, it) } -> "home-wg"
+        nbNets.any { within(d.ip, it) } || Filters.byName(d) && d.ip.lowercase().trimEnd('.') in nbNames -> NB_TAG
         !s.home.tailscale -> null
         (homeSubnets(s) + TAILNET).any { within(d.ip, it) } || Filters.byName(d) && tsDomains.any { d.ip.endsWith(".$it") } -> TS_TAG
         else -> null
@@ -513,6 +547,13 @@ object Compiler {
     /** A MagicDNS suffix as Tailscale reports it ("tail1234.ts.net." or a Headscale base domain), or null if unusable. */
     fun tsSuffix(raw: String?): String? = raw?.trim()?.lowercase()?.trim('.')?.takeIf { it.matches(DOMAIN) && it != "ts.net" }
 
+    /** What the rules use of NetBird's map: its private networks as Android routes them, and its peers' usable names. */
+    fun nbUsed(networks: List<String>, names: List<String>) =
+        networks.mapNotNull(::canonical).filter(::isPrivate).distinct() to names.mapNotNull(::nbName).distinct()
+
+    /** A NetBird peer's DNS name as it reports it ("nas.netbird.cloud."), or null if unusable. */
+    fun nbName(raw: String?): String? = raw?.trim()?.lowercase()?.trim('.')?.takeIf { it.matches(DOMAIN) }
+
     /** Tailscale's own control server (none set, or one on tailscale.com) rather than a Headscale. */
     fun officialTs(h: Home) = h.tsControlUrl == null || runCatching { java.net.URI(h.tsControlUrl).host.lowercase() }.getOrNull()?.let { it == "tailscale.com" || it.endsWith(".tailscale.com") } == true
 
@@ -558,6 +599,7 @@ object Compiler {
         // The plugin and its options (TLS, certificate, host) are part of the tunnel too.
         is SsLink -> listOf("ss", l.profile.server, l.profile.port.toString(), l.profile.method, sha(l.profile.password), l.profile.plugin.orEmpty(), sha(l.profile.pluginOpts.orEmpty()))
         is TsLink -> listOf("ts")
+        is NbLink -> listOf("nb")
     }.joinToString("|")
 
     private fun wgIdentity(p: WgPeer) = listOf(p.endpoint.lowercase(), p.publicKey, sha(p.privateKey)).joinToString("|")
@@ -573,7 +615,7 @@ object Compiler {
      */
     fun clashes(s: Setup, links: Map<String, Link>): Set<String> {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
-        return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
+        return s.activeRoutes.filter { !it.meshExit }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
             r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
         }

@@ -186,7 +186,7 @@ object Stats {
         val id = r?.let(::idOf) ?: routeId
         when {
             r != null -> Exit(id, r.code, r.name, r.hue, r.source)
-            id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.tailscale }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
+            id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.tailscale }, "NetBird".takeIf { setup.netbird }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
             id.startsWith(SpeedTest.NODE) -> Exit(id, "TS", UnbraidVpn.state.value.tsExitNodes.firstOrNull { SpeedTest.NODE + it.ip == id }?.name ?: id.removePrefix(SpeedTest.NODE), -1, "Tailscale")
             else -> null
         }?.let { labels[id] = it }
@@ -208,6 +208,7 @@ object Stats {
             r.ovpn != null -> listOf("ovpn") + app.unbraid.data.Manual.ovpnServers(r.ovpn)
             r.ss != null -> listOf("ss", r.ss.server, "${r.ss.port}")
             r.tsExit != null -> listOf("ts", r.tsExit)
+            r.nbExit != null -> listOf("nb", r.nbExit)
             else -> listOf(l.provider, l.countryCode, l.countryId, l.cityId, l.city, l.region, l.group, l.protocol, l.pinned?.host).map { "$it" }
         }
         val digest = java.security.MessageDigest.getInstance("SHA-256").digest(what.joinToString("\u0000").toByteArray())
@@ -573,10 +574,11 @@ internal object Collector {
     private fun exitOf(tag: String?, own: String, tags: Map<String, String>, byAddress: Boolean = false): String {
         if (tag == null || tag == "direct") return DIRECT
         // The home network over Tailscale shares its tunnel with a Tailscale exit: the rule that carried it tells them apart.
-        if (tag == "home-wg" || byAddress && tag == Compiler.TS_TAG) return Stats.HOME
+        val mesh = tag == Compiler.TS_TAG || tag == Compiler.NB_TAG
+        if (tag == "home-wg" || byAddress && mesh) return Stats.HOME
         val candidates = tags.filterValues { it == tag }.keys
-        if (candidates.isEmpty()) return if (tag == Compiler.TS_TAG) Stats.HOME else tag.removePrefix("r-")
-        return if (own in candidates) own else if (tag == Compiler.TS_TAG) Stats.HOME else candidates.first()
+        if (candidates.isEmpty()) return if (mesh) Stats.HOME else tag.removePrefix("r-")
+        return if (own in candidates) own else if (mesh) Stats.HOME else candidates.first()
     }
 
     private fun first(s: StringIterator?): String? {

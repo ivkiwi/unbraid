@@ -13,6 +13,7 @@ import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
+import app.unbraid.data.NbLink
 import app.unbraid.data.WgLink
 
 /** Chooses the tunnel each active route runs. Kept free of Android so it can be tested. */
@@ -67,6 +68,8 @@ object LinkPicker {
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)
                 r.ss != null -> SsLink(Server(r.ss.name, r.ss.server, r.ss.server, "", 0), r.ss)
                 r.tsExit != null -> TsLink(Server(r.name, r.tsExit, "", "", 0))
+                // Signed out of NetBird: the route waits for it, as one of a provider signed out of.
+                r.nbExit != null -> if (setup.home.netbirdReady) NbLink(Server(r.name, r.nbExit, "", "", 0)) else throw AuthException("Sign in to NetBird in Settings for ${r.name}")
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
                         trusted(it, r, accounts, providers) && Addr.usable(it)

@@ -53,7 +53,8 @@ android {
     // foss = GitHub, no Google Play Billing (no tip jar). Everything else is the same app.
     flavorDimensions += "store"
     productFlavors {
-        create("foss") { dimension = "store"; buildConfigField("boolean", "UPDATE_CHECK", "true"); buildConfigField("boolean", "SUPPORT_ASKS", "true") }
+        create("foss") { dimension = "store"; buildConfigField("boolean", "UPDATE_CHECK", "false"); // fork: upstream's builds lack NetBird and are signed by another key
+            buildConfigField("boolean", "SUPPORT_ASKS", "true") }
         create("play") { dimension = "store"; buildConfigField("boolean", "UPDATE_CHECK", "false"); buildConfigField("boolean", "SUPPORT_ASKS", "false") }
     }
     packaging {

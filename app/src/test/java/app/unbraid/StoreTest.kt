@@ -18,6 +18,8 @@ import app.unbraid.data.Release
 import app.unbraid.support.NudgeState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -31,6 +33,21 @@ import javax.crypto.spec.GCMParameterSpec
 class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+
+    /** NetBird's last map belongs to one account: another one (another server or device key) never gets it. */
+    @Test fun netbirdMapIsBoundToItsAccount() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        val a = app.unbraid.data.Home(nbManagementUrl = "https://nb.example.org", nbPrivateKey = "A".repeat(43) + "=")
+        val b = a.copy(nbPrivateKey = "B".repeat(43) + "=")
+        assertNotEquals(a.nbAccount, b.nbAccount)
+        assertFalse(a.nbAccount!!.contains("AAAA"))
+        assertNull(a.copy(nbPrivateKey = null).nbAccount)
+        assertTrue(s.saveNbMap(a.nbAccount!!, "{\"state\":\"running\"}"))
+        assertEquals("{\"state\":\"running\"}", Store(dir) { key }.nbMap(a.nbAccount))
+        assertNull(s.nbMap(b.nbAccount)); assertNull(s.nbMap(null))
+        s.dropNbMap(); assertNull(s.nbMap(a.nbAccount))
+    }
 
     @Test fun unreadableLinkCacheIsEmpty() {
         val dir = tmp.newFolder()

@@ -22,7 +22,7 @@ object Report {
     private fun plain(s: String) = s.filter { it.isLetterOrDigit() || it in " .-_()" }.take(40)
 
     private fun kind(r: Route) = when {
-        r.wg != null -> "Own WireGuard"; r.ovpn != null -> "Own OpenVPN"; r.ss != null -> "Own Shadowsocks"; r.tsExit != null -> "Tailscale exit"
+        r.wg != null -> "Own WireGuard"; r.ovpn != null -> "Own OpenVPN"; r.ss != null -> "Own Shadowsocks"; r.tsExit != null -> "Tailscale exit"; r.nbExit != null -> "NetBird exit"
         else -> Providers.get(r.loc.provider)?.name ?: "Other provider"
     }
 
@@ -65,6 +65,7 @@ object Report {
             "Block connections without VPN: ${on(vpn.lockdown)}",
             "Always-on VPN: ${on(vpn.alwaysOn)}",
             "Tailscale: ${on(s.tailscale)}" + vpn.tsState?.takeIf { it in tailscale }?.let { " ($it)" }.orEmpty(),
+            "NetBird: ${on(s.netbird)}" + vpn.nb?.state?.takeIf { it in setOf("starting", "running", "failed") }?.let { " ($it)" }.orEmpty(),
             "Home WireGuard: ${on(s.home.wg != null)}",
             "Profiles: ${s.profiles.size}",
             "",

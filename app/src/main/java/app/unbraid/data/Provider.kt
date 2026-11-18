@@ -76,6 +76,10 @@ data class SsLink(override val server: Server, val profile: SsProfile) : Link
 @Serializable
 data class TsLink(override val server: Server) : Link
 
+/** Goes out through the built-in NetBird client's exit node. */
+@Serializable
+data class NbLink(override val server: Server) : Link
+
 /**
  * A VPN provider Unbraid can sign in to. Implementations are plain objects; every call may block on the network
  * and runs off the main thread. [account] is the opaque, sealed blob returned by [signIn].

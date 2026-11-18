@@ -339,6 +339,12 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             setup.servers.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "server" else "servers"}" },
                         ).joinToString(" · "), { go("providers") }, icon = Icons.vpnKey, anchor = TourStop.Connections) { Chevron() },
                         Item("Tailscale", tailscaleHubSub(home.tailscale, setup.tsExit != null, if (home.tailscale) tsStatus else tailscaleSub(true, vpn.phase == Phase.On, vpn.tsState)), { go("tailscale") }, icon = Icons.hub) { Chevron() },
+                        Item("NetBird", when {
+                            !home.netbirdReady -> "Not signed in"
+                            home.netbird -> "On" + vpn.nb?.ip?.let { " · $it" }.orEmpty()
+                            setup.nbExit != null -> "Runs for an exit-node route"
+                            else -> "Off"
+                        }, { go("netbird") }, icon = Icons.hub) { Chevron() },
                         Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
                     ))
                     group("Safety", rise = play to 3, items = listOf(
@@ -480,6 +486,35 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 if (setup.tailscale || tsStored) group(null, listOf(ui.signOutTailscaleRefused().let { no -> Item("Sign out of Tailscale", no?.text ?: "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }.takeIf { no == null }, danger = true) }))
             }
 
+            p == "netbird" -> Page("NetBird", back) {
+                notice(ui, notice)
+                val nb = vpn.nb
+                val status = when {
+                    nb == null -> if (vpn.phase == Phase.On) "Starting" else "Connects with $APP"
+                    nb.running -> listOfNotNull(nb.ip ?: "Connected", "${nb.peers.count { it.connected }} of ${nb.peers.size} peers connected",
+                        "management server unreachable".takeIf { !nb.management }).joinToString(" · ")
+                    nb.state == "failed" -> "Couldn't connect: ${nb.error ?: "unknown error"}"
+                    else -> "Connecting"
+                }
+                group(null, listOfNotNull(
+                    Item("Sign in to NetBird", "Management server and setup key", { tsKeyOpened = true; dialog = "nbserver" }, cta = true) { Chevron() }.takeIf { !home.netbirdReady },
+                    // A wrong first key, or a phone removed from the network (its key is gone once registered): a new one.
+                    Item("Sign in to NetBird again", "Check the server, or add a new setup key", { tsKeyOpened = true; dialog = "nbserver" }, cta = true) { Chevron() }
+                        .takeIf { home.netbirdReady && nb?.state == "failed" },
+                    Item("Reach your NetBird network", if (home.netbird || nb?.state == "failed") status else if (setup.nbExit != null) "Off · NetBird still runs for your exit-node route" else "Peers and their networks, from apps routed through unbraid",
+                        { ui.setHome { it.copy(netbird = !it.netbird) } }, checked = home.netbird, icon = Icons.hub) { Toggle(home.netbird) }.takeIf { home.netbirdReady },
+                ))
+                nb?.exitNodes?.takeIf { it.isNotEmpty() }?.let { nodes -> group("Exit nodes", nodes.map { n ->
+                    val used = setup.routes.count { it.nbExit == n.id }
+                    Item(n.label, "${n.id} · ${if (used == 0) "not used" else "used by $used ${if (used == 1) "route" else "routes"}"}")
+                }) }
+                if (home.netbirdReady) caption("Pick an exit node for a route in Routes. Other devices can't open connections to this phone through NetBird yet.")
+                if (home.netbirdReady) group(null, listOf(
+                    Item("Management server", home.nbManagementUrl.orEmpty(), { tsKeyOpened = true; dialog = "nbserver" }, icon = Icons.dns) { Chevron() },
+                    ui.signOutNetbirdRefused().let { no -> Item("Sign out of NetBird", no?.text ?: "Its exit routes are removed; their apps follow the default route", { dialog = "nbout" }.takeIf { no == null }, danger = true) },
+                ))
+            }
+
             p == "local" -> Page("Local & home access", back) {
                 notice(ui, notice)
                 group("This network", listOfNotNull(
@@ -494,6 +529,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 ))
                 group("Home, from anywhere", listOf(
                     Item("Through Tailscale", if (home.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
+                    Item("Through NetBird", if (home.netbird && home.netbirdReady) "On" else "Off", { go("netbird") }, icon = Icons.hub) { Chevron() },
                     Item("Home WireGuard tunnel", home.wg?.let { "${it.name} · ${it.endpoint}" } ?: "Not set up · import your router's .conf", { pickConfig.launch(arrayOf("*/*")) }, icon = Icons.tunnel) {
                         if (home.wg != null) Secondary("Remove", { dialog = "wgremove" }, color = Ink.bad) else Chevron()
                     },
@@ -687,6 +723,22 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 DialogField(url, { url = it }, "Server URL", "https://headscale.example.com")
                 DialogField(key, { key = it }, "Auth key (optional)", "Signs in without a browser", secret = true)
                 if (!ok) Text("Use a full https:// address", style = Type.caption, color = Ink.bad)
+            }
+        }
+        "nbout" -> Prompt("Sign out of NetBird?", "Sign out", { dialog = null; ui.signOutNetbird()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
+            Text("NetBird exit routes are removed. Their apps follow the default route. Remove this phone in your NetBird dashboard too.", style = Type.sub)
+        }
+        "nbserver" -> if (!tsKeyOpened) LaunchedEffect(Unit) { dialog = null } else {
+            var url by rememberSaveable { mutableStateOf(home.nbManagementUrl ?: "https://api.netbird.io") }
+            var key by remember { mutableStateOf("") }
+            val urlOk = httpsUrl.matches(url.trim())
+            // A saved key can stay; a new server needs one, as it signs the phone in as a new device.
+            val keep = home.nbSetupKey?.takeIf { url.trim() == home.nbManagementUrl }
+            Prompt("NetBird", "Save", { dialog = null; ui.setNetbird(url.trim(), key.trim().ifEmpty { keep!! }) }, { dialog = null }, enabled = urlOk && (key.isNotBlank() || keep != null), secure = true) {
+                Text("Your NetBird management server (NetBird's own is https://api.netbird.io) and a setup key from its dashboard. Another server signs this phone in as a new device.", style = Type.sub)
+                DialogField(url, { url = it }, "Management server", "https://netbird.example.com")
+                DialogField(key, { key = it }, if (keep != null) "Setup key (empty keeps the saved one)" else "Setup key", "From Setup Keys in the dashboard", secret = true)
+                if (!urlOk) Text("Use a full https:// address", style = Type.caption, color = Ink.bad)
             }
         }
         "subnets" -> HomeSubnetsDialog(home.subnets, ui, { dialog = null })
