@@ -123,11 +123,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
         /**
-         * Restores so far: each replaces the whole setup, and is counted before the store changes. An engine still running
-         * a setup read before the latest one ([ranRestores]) runs one that exists nowhere else, so a refused reload stops
-         * the VPN instead of keeping it ([install]). Kept by the process, whatever screen is open.
+         * What a refused reload says when it stops the VPN: the engine still ran a setup from before the latest restore
+         * ([ranRestores]), which exists nowhere else, so it isn't kept ([install]).
          */
-        val restores = java.util.concurrent.atomic.AtomicLong()
         const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
@@ -418,8 +416,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover
             // them. Meanwhile no app goes online at all, rather than on the normal connection.
             if (store.unreadable.value && !store.reopen()) { hold(); return }
-            val seen = restores.get() // before the setup: a restore between the two reads errs on the side of stopping
             val setup = store.setup.value
+            val seen = setup.restore // the restore it comes from, read with it
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
@@ -471,7 +469,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** What the notice says while [holding]: the settings won't open, or the start after they opened failed. */
     private var holdText = UNREADABLE
 
-    /** [restores] as it was when the setup the engine runs was read. */
+    /** [Setup.restore] of the setup the engine runs: the restore it comes from. */
     private var ranRestores = 0L
 
     /**
@@ -705,8 +703,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // A destroyed instance's phase is the next instance's: never act on that connection.
             if (destroyed || state.value.phase != VpnState.Phase.On || holding) return
             val srv = server ?: return
-            val seen = restores.get()
             val setup = store.setup.value
+            val seen = setup.restore
             val accounts = store.accounts.value
             // [keep] was taken without the lock: only valid if nothing was installed since ([keepFrom]).
             val ready = pickLinks(setup, keep?.takeIf { keepFrom == generation } ?: links, accounts, avoid, offline = true)
@@ -754,7 +752,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (restored && restarted) { retry?.cancel(); retry = null }
         else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) retime() // a new engine, numbered afresh
-        if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
+        // A refused setup from another restore than the one running: what runs exists nowhere else.
+        ranRestores = ranRestore(ranRestores, applied, setup)
+        if (restored && ranRestores != setup.restore) teardown(RESTORE_REFUSED)
         else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
         false
     }
@@ -1357,6 +1357,17 @@ internal fun blockedText(setup: Setup, blocked: Map<String, Exception>): String?
 
 /** The Block setting the health watcher starts from: the one compiled into the running tunnel ([built]), else Android's. */
 internal fun startingLockdown(built: Compiler.Input?, android: Boolean) = built?.lockdown ?: android
+
+/**
+ * The restore the running setup ([running]) comes from: [ran], noted when it was installed, or the refused setup's own
+ * when what runs is what that restore stored ([Setup.fromRestore]): the same backup restored again, followed by an edit
+ * quick enough that the watcher saw only the edit. Which apps still wait to be installed, and until when, is set anew by
+ * each restore and cleared as apps arrive: only the apps' and profiles' routes are compared.
+ */
+internal fun ranRestore(ran: Long, running: Setup?, refused: Setup): Long {
+    fun plain(s: Setup) = s.copy(restore = 0, fromRestore = null, waiting = emptySet(), waitingUntil = 0)
+    return if (running != null && refused.fromRestore?.let(::plain) == plain(running)) refused.restore else ran
+}
 
 /** A start ([on]) or a stop or pause, numbered [n] in the order asked. */
 class Ask(val n: Int, val on: Boolean)

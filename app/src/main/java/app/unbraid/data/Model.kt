@@ -239,6 +239,14 @@ data class Setup(
     val waitingEach: Map<String, Map<String, Long>> = emptyMap(),
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
+    /**
+     * Counts the restores this setup comes from, carried by every edit after them; never saved. A change the engine
+     * refuses from another restore than the running setup's stops the VPN ([app.unbraid.vpn.UnbraidVpn]): what runs then
+     * exists nowhere else. Read with the setup, so no reload can see one without the other.
+     */
+    @kotlinx.serialization.Transient val restore: Long = 0,
+    /** What that restore put in the store, carried by the edits after it like [restore]; never saved. */
+    @kotlinx.serialization.Transient val fromRestore: Setup? = null,
 ) {
     fun route(id: String?) = routes.firstOrNull { it.id == id }
 
