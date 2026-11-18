@@ -803,7 +803,11 @@ object RestoreTraffic {
         }.plus(next.routes.filter { it.meshExit }.mapNotNull { n ->
             // A Tailscale or NetBird exit route keeping its id but exiting through another device: both compile to the same tunnel.
             val c = current.route(n.id)?.takeIf { it.meshExit && (it.tsExit != n.tsExit || it.nbExit != n.nbExit) } ?: return@mapNotNull null
-            "\"${shown(Backup.label(n.name, n.source, 256))}\" exits through another ${n.source} device: ${shown(n.tsName ?: n.tsExit ?: n.nbName ?: n.nbExit.orEmpty())} instead of ${shown(c.tsName ?: c.tsExit ?: c.nbName ?: c.nbExit.orEmpty())}."
+            // Each device by its name, or by its address or network ID when the names are the same; all cleaned for showing.
+            val id = { r: Route -> Backup.label(r.tsExit ?: r.nbExit, "?", 256) }
+            val named = { r: Route -> Backup.label(r.tsName ?: r.nbName, id(r), 256) }
+            val (to, from) = (named(n) to named(c)).takeIf { it.first != it.second } ?: (id(n) to id(c))
+            "\"${shown(Backup.label(n.name, n.source, 256))}\" exits through another ${n.source} device: ${shown(to)} instead of ${shown(from)}."
         }).distinct()
     }
 

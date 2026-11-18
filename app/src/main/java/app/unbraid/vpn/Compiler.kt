@@ -252,8 +252,6 @@ object Compiler {
         val answered = (if (homeTs) tsDomains else emptyList()) + (if (s.prefs.lan) LOCAL_NAMES else emptyList())
         @OptIn(SavedSites::class) val retired = s.sites.filterValues { it != BLOCK }.keys
             .flatMap { n -> answered.mapNotNull { x -> if (Sites.under(n, x)) n else x.takeIf { Sites.under(it, n) } } }.distinct().sorted()
-        // The same for NetBird's peers, by exact name only: its lookup rule answers nothing under them.
-        @OptIn(SavedSites::class) val nbRetired = nbNames.filter { x -> s.sites.any { (n, id) -> id != BLOCK && Sites.under(x, n) } }
 
         return buildJsonObject {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
@@ -451,7 +449,10 @@ object Compiler {
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
                     if (retired.isNotEmpty()) add(obj(*match(retired), "action" to "reject", "no_drop" to true))
-                    if (nbRetired.isNotEmpty()) add(obj("domain" to arr(*nbRetired.toTypedArray()), "action" to "reject", "no_drop" to true))
+                    // A NetBird peer's name reaching here came by a stand-in address handed out before NetBird answered it (its
+                    // real address went by the network rules above): refused, so the app looks it up again, never resolved
+                    // elsewhere. By exact name only: NetBird's lookup rule answers nothing under them.
+                    if (nbNames.isNotEmpty()) add(obj("domain" to arr(*nbNames.toTypedArray()), "action" to "reject", "no_drop" to true))
                     if (sites.isNotEmpty()) {
                         // Matched on the name the lookup gave (a fake-IP connection reaches these rules as that name), never on
                         // one read off the connection: an app could write any name there and take a website's route, Direct
