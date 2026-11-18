@@ -29,9 +29,12 @@ class Helpers(unittest.TestCase):
         self.log = os.path.join(t, "bind.log")
         self.bin = os.path.join(t, "bin")  # first on PATH, holds go and git stubs and stale helpers
         os.makedirs(self.bin)
-        # git: pretend the checkout is already at the pin.
+        # git: pretend the sing-box and netbird checkouts are already at their pins.
         exe(os.path.join(self.bin, "git"),
-            '[ "$1" = rev-parse ] && echo c005f35300ce76427dc285481ec5695f5b179cd2\nexit 0\n')
+            'case "$*" in\n'
+            ' *netbird*rev-parse*) echo 499a86f4bc4795310ead5f06ecd5907e585acef4 ;;\n'
+            ' rev-parse*) echo c005f35300ce76427dc285481ec5695f5b179cd2 ;;\n'
+            'esac\nexit 0\n')
         # go: `install` writes helpers into $GOBIN, `version -m` reports STUB_VERSION for them.
         exe(os.path.join(self.bin, "go"),
             'case "$1" in\n'

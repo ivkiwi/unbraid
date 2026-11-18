@@ -1,0 +1,749 @@
+diff --git a/client/embed/embed.go b/client/embed/embed.go
+index 5905c1c..c9249c1 100644
+--- a/client/embed/embed.go
++++ b/client/embed/embed.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/netbirdio/netbird/client/internal/peer"
+ 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+ 	"github.com/netbirdio/netbird/client/mdm"
++	"github.com/netbirdio/netbird/client/netevents"
+ 	nbssh "github.com/netbirdio/netbird/client/ssh"
+ 	"github.com/netbirdio/netbird/client/system"
+ 	"github.com/netbirdio/netbird/shared/management/domain"
+@@ -45,21 +46,36 @@ type PeerConnStatus = peer.ConnStatus
+ 
+ // Client manages a netbird embedded client instance.
+ type Client struct {
+-	deviceName string
+-	config     *profilemanager.Config
+-	mu         sync.Mutex
+-	cancel     context.CancelFunc
+-	setupKey   string
+-	jwtToken   string
+-	connect    *internal.ConnectClient
+-	recorder   *peer.Status
++	interfaceDiscover InterfaceDiscover
++	pinnedExit        string
++	netEvents         *netevents.Manager
++	deviceName        string
++	config            *profilemanager.Config
++	mu                sync.Mutex
++	cancel            context.CancelFunc
++	setupKey          string
++	jwtToken          string
++	connect           *internal.ConnectClient
++	recorder          *peer.Status
+ 	// inMemoryState is set when no StatePath was given in netstack mode,
+ 	// where the client changes nothing on the host that needs restoring.
+ 	inMemoryState bool
+ }
+ 
++// InterfaceDiscover lists the host's network interfaces, one per line, in the Android client's format:
++// "name index mtu up broadcast loopback pointToPoint multicast | addr/prefix addr/prefix".
++type InterfaceDiscover interface {
++	IFaces() (string, error)
++}
++
+ // Options configures a new Client.
+ type Options struct {
++	// PinnedExitNode is the network ID of the only exit node this peer may use: no other one is ever selected,
++	// whatever management auto-applies, and none while it isn't offered. Empty leaves the selection to management.
++	PinnedExitNode string
++	// InterfaceDiscover supplies the host's interfaces for ICE candidates on Android, where an app can't list
++	// them through Go (netlink is closed to apps). Nil leaves the default.
++	InterfaceDiscover InterfaceDiscover
+ 	// DeviceName is this peer's name in the network
+ 	DeviceName string
+ 	// SetupKey is used for authentication
+@@ -142,26 +158,15 @@ type Performance struct {
+ 	MaxBatchSize *uint32
+ }
+ 
+-// validateCredentials checks that exactly one credential type is provided
++// validateCredentials checks that a credential is provided, and at most one of SetupKey and JWTToken. A PrivateKey
++// may come with either: it names the peer, and the other registers that peer when management doesn't know it yet.
+ func (opts *Options) validateCredentials() error {
+-	credentialsProvided := 0
+-	if opts.SetupKey != "" {
+-		credentialsProvided++
+-	}
+-	if opts.JWTToken != "" {
+-		credentialsProvided++
+-	}
+-	if opts.PrivateKey != "" {
+-		credentialsProvided++
++	if opts.SetupKey != "" && opts.JWTToken != "" {
++		return fmt.Errorf("only one of SetupKey or JWTToken can be specified")
+ 	}
+-
+-	if credentialsProvided == 0 {
++	if opts.SetupKey == "" && opts.JWTToken == "" && opts.PrivateKey == "" {
+ 		return fmt.Errorf("one of SetupKey, JWTToken, or PrivateKey must be provided")
+ 	}
+-	if credentialsProvided > 1 {
+-		return fmt.Errorf("only one of SetupKey, JWTToken, or PrivateKey can be specified")
+-	}
+-
+ 	return nil
+ }
+ 
+@@ -261,12 +266,16 @@ func New(opts Options) (*Client, error) {
+ 		wgbackend.SetMaxBatchSizeOverride(*opts.Performance.MaxBatchSize)
+ 	}
+ 
++	recorder := peer.NewRecorder(config.ManagementURL.String())
+ 	return &Client{
+-		deviceName: opts.DeviceName,
+-		setupKey:   opts.SetupKey,
+-		jwtToken:   opts.JWTToken,
+-		config:     config,
+-		recorder:   peer.NewRecorder(config.ManagementURL.String()),
++		interfaceDiscover: opts.InterfaceDiscover,
++		pinnedExit:        opts.PinnedExitNode,
++		netEvents:         netevents.NewManager(recorder),
++		deviceName:        opts.DeviceName,
++		setupKey:          opts.SetupKey,
++		jwtToken:          opts.JWTToken,
++		config:            config,
++		recorder:          recorder,
+ 		// Without a path the default would be the installed agent's state
+ 		// file, which this client must neither read nor overwrite.
+ 		inMemoryState: opts.StatePath == "" && !opts.NoUserspace,
+@@ -283,6 +292,9 @@ func (c *Client) Start(startCtx context.Context) error {
+ 	}
+ 
+ 	ctx, cancel := context.WithCancel(internal.CtxInitState(context.Background()))
++	// Login and the engine start run on ctx: giving up on startCtx must end them too, not only the wait below.
++	stopStartCancellation := context.AfterFunc(startCtx, cancel)
++	defer stopStartCancellation()
+ 	defer func() {
+ 		if c.connect == nil {
+ 			cancel()
+@@ -301,7 +313,10 @@ func (c *Client) Start(startCtx context.Context) error {
+ 	if err, _ := authClient.Login(ctx, c.setupKey, c.jwtToken); err != nil {
+ 		return fmt.Errorf("login: %w", err)
+ 	}
+-	var connectOpts []internal.ConnectClientOption
++	connectOpts := []internal.ConnectClientOption{internal.WithNetEvents(c.netEvents), internal.WithPinnedExitNode(c.pinnedExit)}
++	if c.interfaceDiscover != nil {
++		connectOpts = append(connectOpts, internal.WithInterfaceDiscover(c.interfaceDiscover))
++	}
+ 	if c.inMemoryState {
+ 		connectOpts = append(connectOpts, internal.WithInMemoryState())
+ 	}
+diff --git a/client/embed/exitnode.go b/client/embed/exitnode.go
+new file mode 100644
+index 0000000..233d0b7
+--- /dev/null
++++ b/client/embed/exitnode.go
+@@ -0,0 +1,136 @@
++package embed
++
++import (
++	"net/netip"
++	"sort"
++
++	"github.com/netbirdio/netbird/client/internal/peer"
++	"github.com/netbirdio/netbird/client/internal/routemanager"
++	"github.com/netbirdio/netbird/route"
++)
++
++// ExitNode is an exit-node network (a default route) that management offers this peer.
++type ExitNode struct {
++	// ID is its network ID (what Options.PinnedExitNode takes).
++	ID string
++	// Peers are the WireGuard public keys of the routing peers that serve it.
++	Peers []string
++	// Selected reports whether its default route is the one installed for this peer.
++	Selected bool
++}
++
++// routes returns the route manager once the engine has set it up fully ([internal.Engine.ReadyRouteManager]).
++func (c *Client) routes() (routemanager.Manager, error) {
++	engine, err := c.getEngine()
++	if err != nil {
++		return nil, err
++	}
++	rm := engine.ReadyRouteManager()
++	if rm == nil {
++		return nil, ErrEngineNotStarted
++	}
++	return rm, nil
++}
++
++// ExitNodes lists the exit nodes this peer may use, sorted by ID. Selected is what gets installed (so, with an exit
++// node pinned, only that one); routes are read by network, as a network ID may also carry ordinary networks.
++func (c *Client) ExitNodes() ([]ExitNode, error) {
++	rm, err := c.routes()
++	if err != nil {
++		return nil, err
++	}
++	defaults := make(map[route.NetID][]*route.Route)
++	for id, routes := range rm.GetClientRoutes() {
++		if isExit(routes) {
++			defaults[id.NetID()] = append(defaults[id.NetID()], routes...)
++		}
++	}
++	selected := make(map[route.NetID]bool)
++	for id, routes := range rm.GetSelectedClientRoutes() {
++		if isExit(routes) {
++			selected[id.NetID()] = true
++		}
++	}
++	// The IPv6 half of an exit node follows its IPv4 base: list such a pair once.
++	paired := route.V6ExitMergeSet(defaults)
++	var nodes []ExitNode
++	for id, routes := range defaults {
++		if _, ok := paired[id]; ok {
++			continue
++		}
++		n := ExitNode{ID: string(id), Selected: selected[id]}
++		for _, r := range routes {
++			n.Peers = append(n.Peers, r.Peer)
++		}
++		nodes = append(nodes, n)
++	}
++	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
++	return nodes, nil
++}
++
++// RoutedPrefixes lists the networks behind routing peers that this peer currently reaches (selected network routes
++// with an IP range; exit nodes and domain routes are left out), sorted and without repeats.
++func (c *Client) RoutedPrefixes() ([]netip.Prefix, error) {
++	rm, err := c.routes()
++	if err != nil {
++		return nil, err
++	}
++	selector := rm.GetRouteSelector()
++	seen := map[netip.Prefix]struct{}{}
++	// By network and ID: one network ID may name several networks.
++	for haID, routes := range rm.GetClientRoutes() {
++		if len(routes) == 0 || isExit(routes) || !selector.IsSelected(haID.NetID()) || routes[0].IsDynamic() || !routes[0].Network.IsValid() {
++			continue
++		}
++		seen[routes[0].Network.Masked()] = struct{}{}
++	}
++	prefixes := make([]netip.Prefix, 0, len(seen))
++	for p := range seen {
++		prefixes = append(prefixes, p)
++	}
++	sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].String() < prefixes[j].String() })
++	return prefixes, nil
++}
++
++// NetworkChanged tells the client that the host switched networks: its management, signal and relay connections
++// redial on the new one.
++func (c *Client) NetworkChanged() {
++	c.netEvents.NotifyNetworkChange()
++}
++
++// MapToken names the running engine and the network map it has applied in full, else nil (no map yet, or one being
++// applied). Equal tokens before and after reading the client's state mean that state came from one engine and one map.
++func (c *Client) MapToken() any {
++	engine, err := c.getEngine()
++	if err != nil {
++		return nil
++	}
++	n := engine.MapCount()
++	if !engine.MapApplied() || engine.MapCount() != n {
++		return nil
++	}
++	return mapToken{engine, n}
++}
++
++type mapToken struct {
++	engine any
++	count  uint64
++}
++
++// Snapshot is the client's last known state without running health probes (no network calls), unlike Status.
++func (c *Client) Snapshot() peer.FullStatus {
++	return c.recorder.GetFullStatus()
++}
++
++// Exited reports whether a started client's run loop has ended for good: stopped, or a permanent error such as a
++// login its management server no longer accepts. Its status still reads as it last was.
++func (c *Client) Exited() bool {
++	c.mu.Lock()
++	connect := c.connect
++	c.mu.Unlock()
++	return connect != nil && connect.Exited()
++}
++
++func isExit(routes []*route.Route) bool {
++	return len(routes) > 0 && (route.IsV4DefaultRoute(routes[0].Network) || route.IsV6DefaultRoute(routes[0].Network))
++}
+diff --git a/client/internal/connect.go b/client/internal/connect.go
+index fa6808b..7e6694c 100644
+--- a/client/internal/connect.go
++++ b/client/internal/connect.go
+@@ -44,6 +44,7 @@ import (
+ 	"github.com/netbirdio/netbird/client/ssh"
+ 	sshconfig "github.com/netbirdio/netbird/client/ssh/config"
+ 	"github.com/netbirdio/netbird/client/system"
++	"github.com/netbirdio/netbird/route"
+ 	mgm "github.com/netbirdio/netbird/shared/management/client"
+ 	mgmProto "github.com/netbirdio/netbird/shared/management/proto"
+ 	"github.com/netbirdio/netbird/shared/relay/auth/hmac"
+@@ -58,6 +59,10 @@ import (
+ var androidRunOverride func(c *ConnectClient, runningChan chan struct{}, logPath string) error
+ 
+ type ConnectClient struct {
++	// interfaceDiscover lists the host's interfaces for an embedded client on Android; nil lists none.
++	interfaceDiscover stdnet.ExternalIFaceDiscover
++	// pinnedExit is the only exit node an embedded client may use ([WithPinnedExitNode]).
++	pinnedExit     string
+ 	ctx            context.Context
+ 	runCancel      context.CancelFunc
+ 	runExited      chan struct{}
+@@ -93,6 +98,26 @@ func WithInMemoryState() ConnectClientOption {
+ 	return func(c *ConnectClient) { c.inMemoryState = true }
+ }
+ 
++// Exited reports whether the run loop has ended for good (stopped, or a permanent error such as a revoked login).
++func (c *ConnectClient) Exited() bool {
++	select {
++	case <-c.runExited:
++		return true
++	default:
++		return false
++	}
++}
++
++// WithPinnedExitNode makes network ID id the only exit node the engine may use.
++func WithPinnedExitNode(id string) ConnectClientOption {
++	return func(c *ConnectClient) { c.pinnedExit = id }
++}
++
++// WithInterfaceDiscover supplies the host's interfaces to an embedded client on Android.
++func WithInterfaceDiscover(discover stdnet.ExternalIFaceDiscover) ConnectClientOption {
++	return func(c *ConnectClient) { c.interfaceDiscover = discover }
++}
++
+ // WithNetEvents injects the OS network event handling.
+ func WithNetEvents(events *netevents.Manager) ConnectClientOption {
+ 	return func(c *ConnectClient) { c.netMgr = events }
+@@ -448,6 +473,9 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan
+ 		peerConfig := loginResp.GetPeerConfig()
+ 
+ 		engineConfig, err := createEngineConfig(myPrivateKey, c.config, peerConfig, logPath)
++		if err == nil {
++			engineConfig.PinnedExitNode = route.NetID(c.pinnedExit)
++		}
+ 		if err != nil {
+ 			log.Error(err)
+ 			return wrapErr(err)
+diff --git a/client/internal/connect_android_default.go b/client/internal/connect_android_default.go
+index b05e91f..9591ceb 100644
+--- a/client/internal/connect_android_default.go
++++ b/client/internal/connect_android_default.go
+@@ -65,8 +65,12 @@ func init() {
+ 	// Applications that need P2P ICE or real DNS should replace this by
+ 	// setting androidRunOverride before calling Start().
+ 	androidRunOverride = func(c *ConnectClient, runningChan chan struct{}, logPath string) error {
++		var discover stdnet.ExternalIFaceDiscover = noopIFaceDiscover{}
++		if c.interfaceDiscover != nil {
++			discover = c.interfaceDiscover
++		}
+ 		return c.runOnAndroidEmbed(
+-			noopIFaceDiscover{},
++			discover,
+ 			noopNetworkChangeListener{},
+ 			[]netip.AddrPort{},
+ 			noopDnsReadyListener{},
+diff --git a/client/internal/engine.go b/client/internal/engine.go
+index 4de0209..46e74bb 100644
+--- a/client/internal/engine.go
++++ b/client/internal/engine.go
+@@ -110,6 +110,9 @@ var ErrResetConnection = fmt.Errorf("reset connection")
+ var ErrEngineAlreadyStarted = errors.New("engine already started")
+ 
+ type EngineConfig struct {
++	// PinnedExitNode is the only exit node this peer may use ([routemanager.ManagerConfig.PinnedExitNode]).
++	PinnedExitNode route.NetID
++
+ 	WgPort      int
+ 	WgIfaceName string
+ 
+@@ -253,6 +256,11 @@ type Engine struct {
+ 
+ 	// networkSerial is the latest CurrentSerial (state ID) of the network sent by the Management service
+ 	networkSerial uint64
++	// mapApplied: the last network map from management was applied in full, its routes included (MapApplied).
++	// Atomic: read without syncMsgMux, which a sync may hold for long.
++	mapApplied atomic.Bool
++	// mapCount counts the maps applied in full, so two maps of one engine can be told apart (MapCount).
++	mapCount atomic.Uint64
+ 
+ 	// latestComponents is the most-recent NetworkMapComponents decoded from
+ 	// a NetworkMapEnvelope (capability=3 peers only). Held alongside the
+@@ -644,6 +652,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL)
+ 		PeerStore:           e.peerStore,
+ 		DisableClientRoutes: e.config.DisableClientRoutes,
+ 		DisableServerRoutes: e.config.DisableServerRoutes,
++		PinnedExitNode:      e.config.PinnedExitNode,
+ 	})
+ 	if err := e.routeManager.Init(); err != nil {
+ 		log.Errorf("Failed to initialize route manager: %s", err)
+@@ -1615,6 +1624,8 @@ func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
+ 		log.Debugf("received outdated NetworkMap with serial %d, ignoring", serial)
+ 		return nil
+ 	}
++	// Not ready while this map is being applied, nor after an error stops it half way: readers keep the last one.
++	e.mapApplied.Store(false)
+ 
+ 	// Only update the flag when the sync carries a peer config; a nil peer config
+ 	// (e.g. a partial update) must not reset the cached flag to false.
+@@ -1669,8 +1680,10 @@ func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
+ 
+ 	done = e.phase("routes_apply")
+ 	dnsRouteFeatureFlag := toDNSFeatureFlag(networkMap)
++	routesFailed := false
+ 	if err := e.routeManager.UpdateRoutes(serial, serverRoutes, clientRoutes, dnsRouteFeatureFlag); err != nil {
+ 		log.Errorf("failed to update routes: %v", err)
++		routesFailed = true
+ 	}
+ 	done()
+ 
+@@ -1702,6 +1715,11 @@ func (e *Engine) updateNetworkMap(networkMap *mgmProto.NetworkMap) error {
+ 	done()
+ 
+ 	e.networkSerial = serial
++	// A map whose routes didn't all apply doesn't count: whoever reads this keeps the last one that did.
++	if !routesFailed {
++		e.mapCount.Add(1)
++		e.mapApplied.Store(true)
++	}
+ 
+ 	return nil
+ }
+@@ -2717,6 +2735,27 @@ func (e *Engine) GetNet() (*wgbackend.NetstackNet, error) {
+ 	return nsnet, nil
+ }
+ 
++// MapApplied reports whether this engine has applied a network map from management in full.
++func (e *Engine) MapApplied() bool {
++	return e.mapApplied.Load()
++}
++
++// MapCount is the number of network maps this engine has applied in full.
++func (e *Engine) MapCount() uint64 {
++	return e.mapCount.Load()
++}
++
++// ReadyRouteManager returns the route manager once Start has set it up fully, or nil. Read under the start lock:
++// the engine is published before Start runs, and the manager gets its route selector only during it.
++func (e *Engine) ReadyRouteManager() routemanager.Manager {
++	e.syncMsgMux.Lock()
++	defer e.syncMsgMux.Unlock()
++	if e.routeManager == nil || e.routeManager.GetRouteSelector() == nil {
++		return nil
++	}
++	return e.routeManager
++}
++
+ func (e *Engine) Address() (netip.Addr, error) {
+ 	e.syncMsgMux.Lock()
+ 	intf := e.wgInterface
+@@ -2725,7 +2764,8 @@ func (e *Engine) Address() (netip.Addr, error) {
+ 		return netip.Addr{}, errors.New("wireguard interface not initialized")
+ 	}
+ 
+-	return e.wgInterface.Address().IP, nil
++	// The copy taken under the lock: Stop may clear e.wgInterface meanwhile.
++	return intf.Address().IP, nil
+ }
+ 
+ // SetCapture sets or clears packet capture on the WireGuard device.
+diff --git a/client/internal/routemanager/manager.go b/client/internal/routemanager/manager.go
+index 7d699fb..cddf1b3 100644
+--- a/client/internal/routemanager/manager.go
++++ b/client/internal/routemanager/manager.go
+@@ -81,6 +81,9 @@ type ManagerConfig struct {
+ 	PeerStore           *peerstore.Store
+ 	DisableClientRoutes bool
+ 	DisableServerRoutes bool
++	// PinnedExitNode, when set, is the only exit node this peer may use: no other one is ever selected, whatever
++	// management auto-applies, and none while management doesn't offer it.
++	PinnedExitNode route.NetID
+ }
+ 
+ // DefaultManager is the default instance of a route manager
+@@ -110,6 +113,7 @@ type DefaultManager struct {
+ 	useNewDNSRoute      bool
+ 	disableClientRoutes bool
+ 	disableServerRoutes bool
++	pinnedExit          route.NetID
+ 	activeRoutes        map[route.HAUniqueID]client.RouteHandler
+ 	fakeIPManager       *fakeip.Manager
+ 	dnsForwarderPort    atomic.Uint32
+@@ -140,6 +144,7 @@ func NewManager(config ManagerConfig) *DefaultManager {
+ 		peerStore:           config.PeerStore,
+ 		disableClientRoutes: config.DisableClientRoutes,
+ 		disableServerRoutes: config.DisableServerRoutes,
++		pinnedExit:          config.PinnedExitNode,
+ 		activeRoutes:        make(map[route.HAUniqueID]client.RouteHandler),
+ 	}
+ 	dm.dnsForwarderPort.Store(uint32(nbdns.ForwarderClientPort))
+@@ -436,7 +441,7 @@ func (m *DefaultManager) UpdateRoutes(
+ 		// Update route selector based on management server's isSelected status
+ 		m.updateRouteSelectorFromManagement(clientRoutes)
+ 
+-		filteredClientRoutes := m.routeSelector.FilterSelectedExitNodes(clientRoutes)
++		filteredClientRoutes := m.selected(clientRoutes)
+ 
+ 		if err := m.updateSystemRoutes(filteredClientRoutes); err != nil {
+ 			merr = multierror.Append(merr, fmt.Errorf("update system routes: %w", err))
+@@ -502,7 +507,7 @@ func (m *DefaultManager) GetSelectedClientRoutes() route.HAMap {
+ 	m.mux.Lock()
+ 	defer m.mux.Unlock()
+ 
+-	return m.routeSelector.FilterSelectedExitNodes(maps.Clone(m.clientRoutes))
++	return m.selected(maps.Clone(m.clientRoutes))
+ }
+ 
+ // GetActiveClientRoutes returns the subset of selected client routes
+@@ -510,7 +515,7 @@ func (m *DefaultManager) GetSelectedClientRoutes() route.HAMap {
+ // the one actively carrying the route (not just an HA sibling).
+ func (m *DefaultManager) GetActiveClientRoutes() route.HAMap {
+ 	m.mux.Lock()
+-	selected := m.routeSelector.FilterSelectedExitNodes(maps.Clone(m.clientRoutes))
++	selected := m.selected(maps.Clone(m.clientRoutes))
+ 	recorder := m.statusRecorder
+ 	m.mux.Unlock()
+ 
+@@ -555,7 +560,7 @@ func (m *DefaultManager) TriggerSelection(networks route.HAMap) {
+ 	m.mux.Lock()
+ 	defer m.mux.Unlock()
+ 
+-	networks = m.routeSelector.FilterSelectedExitNodes(networks)
++	networks = m.selected(networks)
+ 
+ 	m.notifier.OnNewRoutes(networks)
+ 
+@@ -730,6 +735,11 @@ func (m *DefaultManager) updateRouteSelectorFromManagement(clientRoutes route.HA
+ 		return
+ 	}
+ 
++	if m.pinnedExit != "" {
++		m.enforcePinnedExit(clientRoutes)
++		return
++	}
++
+ 	info := m.collectExitNodeInfo(clientRoutes)
+ 	if len(info.allIDs) == 0 {
+ 		return
+@@ -758,6 +768,51 @@ func (m *DefaultManager) mirrorV6ExitPairSelections(clientRoutes route.HAMap) {
+ 	}
+ }
+ 
++// selected is what the route selector lets through. With an exit node pinned, no default route but the pinned
++// node's gets through either: one under its own network ID, or the IPv6 one of its "-v6" half while its IPv4 base is
++// on this map. Dropped by network and ID, so a routing peer's subnet stays though its default route goes.
++func (m *DefaultManager) selected(routes route.HAMap) route.HAMap {
++	out := m.routeSelector.FilterSelectedExitNodes(routes) // a new map: entries can go
++	if m.pinnedExit == "" {
++		return out
++	}
++	pinnedV6 := route.NetID(string(m.pinnedExit) + route.V6ExitSuffix)
++	base := false
++	for id, routes := range routes {
++		base = base || id.NetID() == m.pinnedExit && len(routes) > 0 && route.IsV4DefaultRoute(routes[0].Network)
++	}
++	for id, routes := range out {
++		if !isExitNodeRoutes(routes) {
++			continue
++		}
++		if n := id.NetID(); n == m.pinnedExit || base && n == pinnedV6 && route.IsV6DefaultRoute(routes[0].Network) {
++			continue
++		}
++		delete(out, id)
++	}
++	return out
++}
++
++// enforcePinnedExit selects the pinned exit node, with its IPv6 half when it has one, whenever management offers it.
++// Nothing else is deselected: that would stay recorded for the whole network ID, and cut off an ordinary network the
++// same routing peer offers later. Other exit nodes' default routes are dropped where routes are installed (selected).
++func (m *DefaultManager) enforcePinnedExit(clientRoutes route.HAMap) {
++	defaults := make(map[route.NetID][]*route.Route)
++	for haID, routes := range clientRoutes {
++		if isExitNodeRoutes(routes) {
++			defaults[haID.NetID()] = append(defaults[haID.NetID()], routes...)
++		}
++	}
++	if _, offered := defaults[m.pinnedExit]; !offered {
++		return
++	}
++	m.routeSelector.SetExclusiveExitNode(m.pinnedExit, nil)
++	pinnedV6 := route.NetID(string(m.pinnedExit) + route.V6ExitSuffix)
++	if _, paired := route.V6ExitMergeSet(defaults)[pinnedV6]; paired {
++		m.routeSelector.SetExclusiveExitNode(pinnedV6, nil)
++	}
++}
++
+ type exitNodeInfo struct {
+ 	allIDs               []route.NetID
+ 	selectedByManagement []route.NetID
+@@ -864,7 +919,7 @@ func (m *DefaultManager) overlayNetworks() []string {
+ 
+ // clientRouteRange returns the static client route networks of the selected exit nodes together with the fake IP blocks.
+ func (m *DefaultManager) clientRouteRange() []string {
+-	filtered := m.routeSelector.FilterSelectedExitNodes(m.clientRoutes)
++	filtered := m.selected(m.clientRoutes)
+ 	var nets []string
+ 	for _, routes := range filtered {
+ 		for _, r := range routes {
+diff --git a/client/internal/routemanager/pinned_exit_test.go b/client/internal/routemanager/pinned_exit_test.go
+new file mode 100644
+index 0000000..3f17dcd
+--- /dev/null
++++ b/client/internal/routemanager/pinned_exit_test.go
+@@ -0,0 +1,115 @@
++package routemanager
++
++import (
++	"net/netip"
++	"sort"
++	"testing"
++
++	"github.com/netbirdio/netbird/client/internal/routeselector"
++	"github.com/netbirdio/netbird/route"
++)
++
++func TestPinnedExitNode(t *testing.T) {
++	exit := func(id, network string, auto bool) *route.Route {
++		return &route.Route{ID: route.ID(id), NetID: route.NetID(id), Network: netip.MustParsePrefix(network), Peer: id, SkipAutoApply: !auto}
++	}
++	routes := func(rs ...*route.Route) route.HAMap {
++		m := route.HAMap{}
++		for _, r := range rs {
++			m[r.GetHAUniqueID()] = append(m[r.GetHAUniqueID()], r)
++		}
++		return m
++	}
++	// What would be installed: the exit routes the selector lets through.
++	installed := func(m *DefaultManager, rs route.HAMap) []string {
++		var ids []string
++		for id := range m.selected(rs) {
++			ids = append(ids, string(id.NetID()))
++		}
++		sort.Strings(ids)
++		return ids
++	}
++	same := func(a, b []string) bool {
++		if len(a) != len(b) {
++			return false
++		}
++		for i := range a {
++			if a[i] != b[i] {
++				return false
++			}
++		}
++		return true
++	}
++	// On the first map: A and its IPv6 half only, though management auto-applies B (paired) and a standalone IPv4
++	// exit node whose name ends in "-v6".
++	first := routes(exit("A", "0.0.0.0/0", false), exit("A-v6", "::/0", false), exit("B", "0.0.0.0/0", true), exit("B-v6", "::/0", true),
++		exit("office-v6", "0.0.0.0/0", true))
++	m := &DefaultManager{routeSelector: routeselector.NewRouteSelector(), pinnedExit: "A"}
++	m.updateRouteSelectorFromManagement(first)
++	if got := installed(m, first); !same(got, []string{"A", "A-v6"}) {
++		t.Fatalf("pinned A: installed %v", got)
++	}
++	// A gone from the map: no default route at all.
++	gone := routes(exit("B", "0.0.0.0/0", true), exit("B-v6", "::/0", true))
++	m.updateRouteSelectorFromManagement(gone)
++	if got := installed(m, gone); len(got) != 0 {
++		t.Fatalf("pinned A missing: installed %v", got)
++	}
++	// Pinned to one never offered, from the start: none.
++	missing := &DefaultManager{routeSelector: routeselector.NewRouteSelector(), pinnedExit: "C"}
++	missing.updateRouteSelectorFromManagement(first)
++	if got := installed(missing, first); len(got) != 0 {
++		t.Fatalf("pinned C: installed %v", got)
++	}
++	// A routing peer whose network ID carries a subnet and an auto-applied default route: its subnet stays, its
++	// default route goes, whatever order the map is read in. What gets installed, by network and ID.
++	subnet := &route.Route{ID: "B-lan", NetID: "B", Network: netip.MustParsePrefix("10.1.0.0/24"), Peer: "B"}
++	mixed := routes(exit("A", "0.0.0.0/0", false), exit("B", "0.0.0.0/0", true), subnet)
++	for i := 0; i < 20; i++ {
++		p := &DefaultManager{routeSelector: routeselector.NewRouteSelector(), pinnedExit: "A"}
++		p.updateRouteSelectorFromManagement(mixed)
++		var got []string
++		for id := range p.selected(mixed) {
++			got = append(got, string(id))
++		}
++		sort.Strings(got)
++		if !same(got, []string{"A|0.0.0.0/0", "B|10.1.0.0/24"}) {
++			t.Fatalf("pinned A with B's subnet: installed %v", got)
++		}
++	}
++	// One manager across maps: B first offers only a default route, then a subnet too; the subnet gets through.
++	later := &DefaultManager{routeSelector: routeselector.NewRouteSelector(), pinnedExit: "A"}
++	firstMap := routes(exit("A", "0.0.0.0/0", false), exit("B", "0.0.0.0/0", true))
++	later.updateRouteSelectorFromManagement(firstMap)
++	if got := installed(later, firstMap); !same(got, []string{"A"}) {
++		t.Fatalf("first map: installed %v", got)
++	}
++	secondMap := routes(exit("A", "0.0.0.0/0", false), exit("B", "0.0.0.0/0", true), subnet)
++	later.updateRouteSelectorFromManagement(secondMap)
++	var second []string
++	for id := range later.selected(secondMap) {
++		second = append(second, string(id))
++	}
++	sort.Strings(second)
++	if !same(second, []string{"A|0.0.0.0/0", "B|10.1.0.0/24"}) {
++		t.Fatalf("second map: installed %v", second)
++	}
++	// The pinned node's "-v6" ID without its IPv4 base on the map: its subnet stays, its default route never.
++	v6lan := &route.Route{ID: "A-v6-lan", NetID: "A-v6", Network: netip.MustParsePrefix("10.2.0.0/24"), Peer: "C"}
++	orphan := routes(exit("A-v6", "::/0", true), v6lan)
++	o := &DefaultManager{routeSelector: routeselector.NewRouteSelector(), pinnedExit: "A"}
++	o.updateRouteSelectorFromManagement(orphan)
++	var got []string
++	for id := range o.selected(orphan) {
++		got = append(got, string(id))
++	}
++	if !same(got, []string{"A-v6|10.2.0.0/24"}) {
++		t.Fatalf("A-v6 without A: installed %v", got)
++	}
++	// Not pinned: management's auto-apply as before.
++	free := &DefaultManager{routeSelector: routeselector.NewRouteSelector()}
++	free.updateRouteSelectorFromManagement(routes(exit("A", "0.0.0.0/0", false), exit("B", "0.0.0.0/0", true)))
++	if !free.routeSelector.IsSelected("B") || free.routeSelector.IsSelected("A") {
++		t.Fatal("without a pin, management's auto-applied exit node is used")
++	}
++}
+diff --git a/client/internal/stdnet/stdnet.go b/client/internal/stdnet/stdnet.go
+index 32f0306..1bbc815 100644
+--- a/client/internal/stdnet/stdnet.go
++++ b/client/internal/stdnet/stdnet.go
+@@ -53,9 +53,11 @@ func NewNetWithDiscover(ctx context.Context, iFaceDiscover ExternalIFaceDiscover
+ 		interfaceFilter: InterfaceFilter(disallowList, detector),
+ 		ctx:             ctx,
+ 	}
+-	// current ExternalIFaceDiscover implement in android-client https://github.dev/netbirdio/android-client
+-	// so in android cli use pionDiscover
+-	if netstack.IsEnabled() {
++	// A supplied discovery wins, netstack mode included: an Android app can't list interfaces through Go. Without
++	// one, the Android CLI in netstack mode lists them through pion as before.
++	if iFaceDiscover != nil {
++		n.iFaceDiscover = newMobileIFaceDiscover(iFaceDiscover)
++	} else if netstack.IsEnabled() {
+ 		n.iFaceDiscover = pionDiscover{}
+ 	} else {
+ 		n.iFaceDiscover = newMobileIFaceDiscover(iFaceDiscover)
+diff --git a/shared/management/client/grpc.go b/shared/management/client/grpc.go
+index 61cd96b..32cc760 100644
+--- a/shared/management/client/grpc.go
++++ b/shared/management/client/grpc.go
+@@ -600,7 +600,7 @@ func (c *GrpcClient) login(req *proto.LoginRequest) (*proto.LoginResponse, error
+ 
+ 	var resp *proto.EncryptedMessage
+ 	operation := func() error {
+-		mgmCtx, cancel := context.WithTimeout(context.Background(), ConnectTimeout)
++		mgmCtx, cancel := context.WithTimeout(c.ctx, ConnectTimeout)
+ 		defer cancel()
+ 
+ 		var err error

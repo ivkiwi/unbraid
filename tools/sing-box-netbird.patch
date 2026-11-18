@@ -1,0 +1,882 @@
+diff --git a/constant/dns.go b/constant/dns.go
+index d026880..4962bdf 100644
+--- a/constant/dns.go
++++ b/constant/dns.go
+@@ -28,6 +28,7 @@ const (
+ 	DNSTypeDHCP        = "dhcp"
+ 	DNSTypeMDNS        = "mdns"
+ 	DNSTypeTailscale   = "tailscale"
++	DNSTypeNetbird     = "netbird"
+ 	DNSTypeOpenConnect = "openconnect"
+ 	DNSTypeOpenVPN     = "openvpn"
+ )
+diff --git a/constant/proxy.go b/constant/proxy.go
+index d42e5d9..d99c29c 100644
+--- a/constant/proxy.go
++++ b/constant/proxy.go
+@@ -30,6 +30,7 @@ const (
+ 	TypeOpenVPNClient      = "openvpn-client"
+ 	TypeOpenVPNServer      = "openvpn-server"
+ 	TypeTailscale          = "tailscale"
++	TypeNetbird            = "netbird"
+ 	TypeCloudflared        = "cloudflared"
+ 	TypeDERP               = "derp"
+ 	TypeResolved           = "resolved"
+@@ -108,6 +109,8 @@ func ProxyDisplayName(proxyType string) string {
+ 		return "OpenVPN Client"
+ 	case TypeOpenVPNServer:
+ 		return "OpenVPN Server"
++	case TypeNetbird:
++		return "NetBird"
+ 	case TypeTailscale:
+ 		return "Tailscale"
+ 	case TypeCloudflared:
+diff --git a/experimental/libbox/netbird.go b/experimental/libbox/netbird.go
+new file mode 100644
+index 0000000..d2c050f
+--- /dev/null
++++ b/experimental/libbox/netbird.go
+@@ -0,0 +1,8 @@
++package libbox
++
++import "github.com/sagernet/sing-box/protocol/netbird"
++
++// NetbirdStatus describes the running NetBird endpoint as JSON (state, this device, peers, exit nodes).
++func NetbirdStatus() string {
++	return netbird.StatusJSON()
++}
+diff --git a/include/registry.go b/include/registry.go
+index 9bb9220..6dcd4c6 100644
+--- a/include/registry.go
++++ b/include/registry.go
+@@ -27,6 +27,7 @@ import (
+ 	"github.com/sagernet/sing-box/protocol/http"
+ 	"github.com/sagernet/sing-box/protocol/mixed"
+ 	"github.com/sagernet/sing-box/protocol/naive"
++	"github.com/sagernet/sing-box/protocol/netbird"
+ 	"github.com/sagernet/sing-box/protocol/redirect"
+ 	"github.com/sagernet/sing-box/protocol/shadowsocks"
+ 	"github.com/sagernet/sing-box/protocol/shadowtls"
+@@ -114,6 +115,7 @@ func EndpointRegistry() *endpoint.Registry {
+ 	registerOpenConnectEndpoint(registry)
+ 	registerOpenVPNEndpoints(registry)
+ 	registerTailscaleEndpoint(registry)
++	netbird.RegisterEndpoint(registry)
+ 
+ 	return registry
+ }
+@@ -134,6 +136,7 @@ func DNSTransportRegistry() *dns.TransportRegistry {
+ 	registerQUICTransports(registry)
+ 	registerDHCPTransport(registry)
+ 	registerTailscaleTransport(registry)
++	netbird.RegisterTransport(registry)
+ 	registerOpenConnectDNSTransport(registry)
+ 	registerOpenVPNDNSTransport(registry)
+ 
+diff --git a/option/netbird.go b/option/netbird.go
+new file mode 100644
+index 0000000..3c5b50c
+--- /dev/null
++++ b/option/netbird.go
+@@ -0,0 +1,16 @@
++package option
++
++type NetbirdEndpointOptions struct {
++	ManagementURL string `json:"management_url,omitempty"`
++	// SetupKey registers this peer when management doesn't know it yet; not needed once it is registered.
++	SetupKey string `json:"setup_key,omitempty"`
++	// PrivateKey is this peer's WireGuard key (base64), kept by the app: NetBird itself keeps nothing on disk.
++	PrivateKey string `json:"private_key,omitempty"`
++	Hostname   string `json:"hostname,omitempty"`
++	// ExitNode is the network ID of the exit node to use, as `netbird networks list` shows it.
++	ExitNode string `json:"exit_node,omitempty"`
++}
++
++type NetbirdDNSServerOptions struct {
++	Endpoint string `json:"endpoint,omitempty"`
++}
+diff --git a/protocol/netbird/dns.go b/protocol/netbird/dns.go
+new file mode 100644
+index 0000000..ceb90dd
+--- /dev/null
++++ b/protocol/netbird/dns.go
+@@ -0,0 +1,89 @@
++package netbird
++
++import (
++	"context"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/service"
++
++	mDNS "github.com/miekg/dns"
++)
++
++func RegisterTransport(registry *dns.TransportRegistry) {
++	dns.RegisterTransport[option.NetbirdDNSServerOptions](registry, C.DNSTypeNetbird, NewDNSTransport)
++}
++
++var _ adapter.DNSTransport = (*DNSTransport)(nil)
++
++// DNSTransport answers the DNS names of NetBird peers (peer.netbird.cloud or a self-hosted domain) with their
++// addresses. Other names, and NetBird's own nameserver groups, aren't answered here.
++type DNSTransport struct {
++	dns.TransportAdapter
++	ctx         context.Context
++	endpointTag string
++	endpoint    *Endpoint
++}
++
++func NewDNSTransport(ctx context.Context, logger log.ContextLogger, tag string, options option.NetbirdDNSServerOptions) (adapter.DNSTransport, error) {
++	if options.Endpoint == "" {
++		return nil, E.New("missing endpoint")
++	}
++	return &DNSTransport{
++		TransportAdapter: dns.NewTransportAdapter(C.DNSTypeNetbird, tag, nil),
++		ctx:              ctx,
++		endpointTag:      options.Endpoint,
++	}, nil
++}
++
++func (t *DNSTransport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStateInitialize {
++		return nil
++	}
++	found, loaded := service.FromContext[adapter.EndpointManager](t.ctx).Get(t.endpointTag)
++	if !loaded {
++		return E.New("endpoint not found: ", t.endpointTag)
++	}
++	ep, ok := found.(*Endpoint)
++	if !ok {
++		return E.New("endpoint is not NetBird: ", t.endpointTag)
++	}
++	t.endpoint = ep
++	return nil
++}
++
++func (t *DNSTransport) Close() error { return nil }
++
++func (t *DNSTransport) Reset() {}
++
++func (t *DNSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
++	if len(message.Question) == 0 {
++		return nil, E.New("empty DNS question")
++	}
++	question := message.Question[0]
++	hosts, ok := t.endpoint.hosts()
++	if !ok {
++		return nil, E.New("NetBird is not connected yet") // not an answer: nothing is cached as missing
++	}
++	addresses, known := hosts[mDNS.CanonicalName(question.Name)]
++	switch {
++	case !known:
++		return reply(message, mDNS.RcodeNameError), nil
++	case question.Qtype == mDNS.TypeA && len(addresses) > 0:
++		return dns.FixedResponse(message.Id, question, addresses, C.DefaultDNSTTL), nil
++	default: // a peer's name, asked for another type (AAAA, HTTPS…) or with no IPv4 address: it exists, with no record
++		return reply(message, mDNS.RcodeSuccess), nil
++	}
++}
++
++func reply(message *mDNS.Msg, rcode int) *mDNS.Msg {
++	return &mDNS.Msg{MsgHdr: mDNS.MsgHdr{Id: message.Id, Rcode: rcode, Response: true}, Question: []mDNS.Question{message.Question[0]}}
++}
++
++func (t *DNSTransport) ExchangeAsync(ctx context.Context, message *mDNS.Msg, callback func(response *mDNS.Msg, err error)) {
++	callback(t.Exchange(ctx, message))
++}
+diff --git a/protocol/netbird/dns_test.go b/protocol/netbird/dns_test.go
+new file mode 100644
+index 0000000..da05ce4
+--- /dev/null
++++ b/protocol/netbird/dns_test.go
+@@ -0,0 +1,55 @@
++package netbird
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"time"
++
++	mDNS "github.com/miekg/dns"
++)
++
++func TestPeerNames(t *testing.T) {
++	e := &Endpoint{hostsAt: time.Now(), hostsCache: map[string][]netip.Addr{
++		"nas.netbird.cloud.":  {netip.MustParseAddr("100.101.0.7")},
++		"bare.netbird.cloud.": nil,
++	}}
++	tr := &DNSTransport{endpoint: e}
++	ask := func(name string, qtype uint16) *mDNS.Msg {
++		m := new(mDNS.Msg)
++		m.SetQuestion(name, qtype)
++		r, err := tr.Exchange(context.Background(), m)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return r
++	}
++	if r := ask("NAS.netbird.cloud.", mDNS.TypeA); len(r.Answer) != 1 || r.Answer[0].(*mDNS.A).A.String() != "100.101.0.7" {
++		t.Fatalf("A: %v", r)
++	}
++	// A known name has no other records: empty, not "no such name", so the app doesn't drop its IPv4 address.
++	for _, q := range []struct {
++		name  string
++		qtype uint16
++	}{{"nas.netbird.cloud.", mDNS.TypeAAAA}, {"nas.netbird.cloud.", mDNS.TypeHTTPS}, {"bare.netbird.cloud.", mDNS.TypeA}} {
++		if r := ask(q.name, q.qtype); r.Rcode != mDNS.RcodeSuccess || len(r.Answer) != 0 {
++			t.Fatalf("%s %d: %v", q.name, q.qtype, r)
++		}
++	}
++	if r := ask("other.netbird.cloud.", mDNS.TypeA); r.Rcode != mDNS.RcodeNameError {
++		t.Fatalf("unknown name: %v", r)
++	}
++	// Not started and nothing cached: an error, never an answer that could be cached as "no such name".
++	if _, err := (&DNSTransport{endpoint: &Endpoint{}}).Exchange(context.Background(), new(mDNS.Msg).SetQuestion("nas.netbird.cloud.", mDNS.TypeA)); err == nil {
++		t.Fatal("answered before NetBird started")
++	}
++	if bareIP("100.101.0.7/16") != "100.101.0.7" || bareIP("100.101.0.7") != "100.101.0.7" {
++		t.Fatal("bareIP")
++	}
++}
++
++func TestRefused(t *testing.T) {
++	if refused(context.DeadlineExceeded) {
++		t.Fatal("a network error is not a refusal")
++	}
++}
+diff --git a/protocol/netbird/endpoint.go b/protocol/netbird/endpoint.go
+new file mode 100644
+index 0000000..08eeeb2
+--- /dev/null
++++ b/protocol/netbird/endpoint.go
+@@ -0,0 +1,429 @@
++// Package netbird runs NetBird's embeddable client (userspace network stack) as a sing-box endpoint: connections
++// sent to it go to NetBird peers, their routed networks, or the selected exit node.
++package netbird
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"net/netip"
++	"net/url"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/netbirdio/netbird/client/embed"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/endpoint"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing/common/bufio"
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/logger"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++
++	"google.golang.org/grpc/codes"
++	gstatus "google.golang.org/grpc/status"
++)
++
++func RegisterEndpoint(registry *endpoint.Registry) {
++	endpoint.Register[option.NetbirdEndpointOptions](registry, C.TypeNetbird, NewEndpoint)
++}
++
++var (
++	_ adapter.Endpoint                = (*Endpoint)(nil)
++	_ adapter.InterfaceUpdateListener = (*Endpoint)(nil)
++)
++
++type Endpoint struct {
++	endpoint.Adapter
++	ctx       context.Context
++	logger    logger.ContextLogger
++	dnsRouter adapter.DNSRouter
++	network   adapter.NetworkManager
++	platform  adapter.PlatformInterface
++	options   option.NetbirdEndpointOptions
++
++	access   sync.Mutex
++	client   *embed.Client // set once the engine is up
++	err      error         // why it isn't up: the last start error, final unless retrying
++	retrying bool
++	closed   bool
++	cancel   context.CancelFunc
++	stopped  chan struct{}
++	wake     chan struct{} // a network change ends a wait between start attempts
++	// What the engine reaches without an exit node (its network and routed networks), and whether the configured
++	// exit node is the one in use; kept by [keep].
++	local  []netip.Prefix
++	exitOK bool
++
++	hostsCache map[string][]netip.Addr
++	hostsAt    time.Time
++	hostsToken any // the engine the cache was read from ([embed.Client.MapToken])
++}
++
++func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.NetbirdEndpointOptions) (adapter.Endpoint, error) {
++	// Over plain HTTP NetBird talks gRPC without TLS: anyone on the path could act as the management server.
++	u, err := url.Parse(options.ManagementURL)
++	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
++		return nil, E.New("management_url must be an https:// address")
++	}
++	if options.PrivateKey == "" {
++		return nil, E.New("missing private_key")
++	}
++	return &Endpoint{
++		Adapter:   endpoint.NewAdapter(C.TypeNetbird, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
++		ctx:       ctx,
++		logger:    logger,
++		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
++		network:   service.FromContext[adapter.NetworkManager](ctx),
++		platform:  service.FromContext[adapter.PlatformInterface](ctx),
++		options:   options,
++		stopped:   make(chan struct{}),
++		wake:      make(chan struct{}, 1),
++	}, nil
++}
++
++func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage != adapter.StartStateStart {
++		return nil
++	}
++	var discover embed.InterfaceDiscover
++	// On Android NetBird can't list the interfaces itself: without them it finds no direct path to its peers.
++	if e.platform != nil && e.platform.UsePlatformNetworkInterfaces() {
++		if err := e.network.UpdateInterfaces(); err != nil {
++			return E.Cause(err, "list interfaces for NetBird")
++		}
++		discover = interfaces{e.network}
++	}
++	client, err := embed.New(embed.Options{
++		// NetBird itself never selects another exit node, nor one while this one isn't offered.
++		PinnedExitNode:    e.options.ExitNode,
++		InterfaceDiscover: discover,
++		DeviceName:        e.options.Hostname,
++		// The key names this peer; a setup key, while the app still has one, registers it when management doesn't
++		// know it yet. No config path: the settings live in memory and the key stays sealed in the app.
++		PrivateKey:    e.options.PrivateKey,
++		SetupKey:      e.options.SetupKey,
++		ManagementURL: e.options.ManagementURL,
++		LogOutput:     processLog{},
++		LogLevel:      "warn",
++		// Only outgoing connections for now: peers can't open connections to apps on this device.
++		BlockInbound: true,
++	})
++	if err != nil {
++		return E.Cause(err, "create NetBird client")
++	}
++	setLogOwner(e)
++	// Tied to the box: closing it (a stop or a reload) closes this endpoint and ends a start in progress.
++	ctx, cancel := context.WithCancel(scope.Context())
++	e.access.Lock()
++	e.cancel = cancel
++	e.access.Unlock()
++	scope.Add(e.Close)
++	register(e)
++	go e.run(ctx, client)
++	return nil
++}
++
++// run starts the engine, which waits for the management server: the box starts without it. A start that fails for
++// the network is tried again with a growing pause (sooner after a network change); one its server refuses is final.
++func (e *Endpoint) run(ctx context.Context, client *embed.Client) {
++	defer close(e.stopped)
++	pause := 5 * time.Second
++	for {
++		err := client.Start(ctx)
++		e.access.Lock()
++		closed := e.closed
++		final := err == nil || refused(err)
++		if err == nil && !closed {
++			e.client, e.err, e.retrying = client, nil, false
++		} else if err != nil {
++			e.err, e.retrying = err, !final
++		}
++		e.access.Unlock()
++		if err == nil && closed { // Close didn't wait for this start: the engine it brought up goes here
++			stop(client)
++			return
++		}
++		if err == nil {
++			break
++		}
++		if ctx.Err() != nil {
++			return
++		}
++		e.logger.Error("start NetBird: ", err)
++		if final {
++			return
++		}
++		select {
++		case <-ctx.Done():
++			return
++		case <-e.wake:
++		case <-time.After(pause):
++		}
++		pause = min(pause*2, 2*time.Minute)
++	}
++	e.logger.Info("NetBird connected")
++	e.keep(ctx, client)
++}
++
++// refused: the management server turned the login down (a revoked key, a used or wrong setup key), so trying again
++// can't help.
++func refused(err error) bool {
++	st, ok := gstatus.FromError(err) // finds a status wrapped in NetBird's own errors
++	if !ok {
++		return false
++	}
++	switch st.Code() {
++	case codes.PermissionDenied, codes.Unauthenticated, codes.InvalidArgument, codes.NotFound:
++		return true
++	}
++	return false
++}
++
++// keep tracks what the engine reaches on its own (its network and routed networks) and whether the configured exit
++// node is the one in use, for [check].
++func (e *Endpoint) keep(ctx context.Context, client *embed.Client) {
++	ticker := time.NewTicker(5 * time.Second)
++	defer ticker.Stop()
++	for {
++		// NetBird selects the pinned exit node itself, on every map; this only follows whether it is in use.
++		ok := e.options.ExitNode == "" || exitSelected(client, e.options.ExitNode)
++		local := reached(client)
++		e.access.Lock()
++		e.local, e.exitOK = local, ok
++		e.access.Unlock()
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++		}
++	}
++}
++
++// exitSelected: [id] is the exit node in use, and no other one is.
++func exitSelected(client *embed.Client, id string) bool {
++	nodes, err := client.ExitNodes()
++	if err != nil {
++		return false
++	}
++	found := false
++	for _, n := range nodes {
++		if n.Selected && n.ID != id {
++			return false
++		}
++		found = found || n.Selected && n.ID == id
++	}
++	return found
++}
++
++// reached lists NetBird's own network and the networks its routing peers serve.
++func reached(client *embed.Client) []netip.Prefix {
++	var local []netip.Prefix
++	if p, err := netip.ParsePrefix(client.Snapshot().LocalPeerState.IP); err == nil {
++		local = append(local, p.Masked())
++	}
++	routes, _ := client.RoutedPrefixes()
++	return append(local, routes...)
++}
++
++func (e *Endpoint) Close() error {
++	unregister(e)
++	clearLogOwner(e)
++	e.access.Lock()
++	if e.closed {
++		e.access.Unlock()
++		return nil
++	}
++	e.closed = true
++	cancel, client := e.cancel, e.client
++	e.client, e.err, e.retrying = nil, E.New("NetBird is closed"), false
++	e.access.Unlock()
++	if cancel == nil { // never started
++		return nil
++	}
++	cancel() // ends a login or engine start in progress
++	if client != nil {
++		stop(client)
++	}
++	// A start that is still finishing stops its own engine; a reload doesn't wait for it longer than this.
++	select {
++	case <-e.stopped:
++	case <-time.After(10 * time.Second):
++		e.logger.Warn("NetBird is still starting while closed: it stops once started")
++	}
++	return nil
++}
++
++func stop(client *embed.Client) {
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	_ = client.Stop(ctx)
++}
++
++// InterfaceUpdated: the phone switched networks. NetBird's connections redial on the new one; a start waiting to be
++// tried again goes now.
++func (e *Endpoint) InterfaceUpdated(ctx context.Context) {
++	e.access.Lock()
++	client := e.client
++	e.access.Unlock()
++	if client != nil {
++		client.NetworkChanged()
++		return
++	}
++	select {
++	case e.wake <- struct{}{}:
++	default:
++	}
++}
++
++func (e *Endpoint) ready() (*embed.Client, error) {
++	e.access.Lock()
++	defer e.access.Unlock()
++	if e.client != nil {
++		return e.client, nil
++	}
++	if e.err != nil {
++		return nil, E.Cause(e.err, "NetBird")
++	}
++	return nil, E.New("NetBird is not connected yet")
++}
++
++// check refuses an address that would leave through an exit node while the configured one isn't in use: another
++// one, or none yet, must never carry a route's internet traffic. NetBird's network and routed networks pass.
++func (e *Endpoint) check(addr netip.Addr) error {
++	if e.options.ExitNode == "" {
++		return nil
++	}
++	e.access.Lock()
++	defer e.access.Unlock()
++	for _, p := range e.local {
++		if p.Contains(addr) {
++			return nil
++		}
++	}
++	if !e.exitOK {
++		return E.New("NetBird exit node ", e.options.ExitNode, " is not in use yet")
++	}
++	return nil
++}
++
++func (e *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	client, err := e.ready()
++	if err != nil {
++		return nil, err
++	}
++	if destination.IsDomain() {
++		addresses, err := e.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
++		if err != nil {
++			return nil, err
++		}
++		return N.DialSerial(ctx, e, network, destination, addresses)
++	}
++	if err := e.check(destination.Addr.Unmap()); err != nil {
++		return nil, err
++	}
++	e.logger.InfoContext(ctx, "outbound ", network, " connection to ", destination)
++	switch N.NetworkName(network) {
++	case N.NetworkTCP, N.NetworkUDP:
++		return client.DialContext(ctx, N.NetworkName(network), destination.String())
++	default:
++		return nil, E.Extend(N.ErrUnknownNetwork, network)
++	}
++}
++
++// ListenPacket opens UDP on this peer's IPv4 address (NetBird's stack binds there), so IPv4 destinations only.
++func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	client, err := e.ready()
++	if err != nil {
++		return nil, err
++	}
++	e.logger.InfoContext(ctx, "outbound packet connection to ", destination)
++	if destination.IsDomain() {
++		addresses, err := e.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
++		if err != nil {
++			return nil, err
++		}
++		var to netip.Addr
++		for _, a := range addresses {
++			if a.Unmap().Is4() {
++				to = a.Unmap()
++				break
++			}
++		}
++		if !to.IsValid() {
++			return nil, E.New("no IPv4 address for ", destination.Fqdn)
++		}
++		if err := e.check(to); err != nil {
++			return nil, err
++		}
++		conn, err := client.ListenUDP(":0")
++		if err != nil {
++			return nil, err
++		}
++		// The app writes to the name; the stack only knows addresses.
++		return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(to, destination.Port), destination), nil
++	}
++	if !destination.Addr.Unmap().Is4() {
++		return nil, E.New("NetBird carries UDP to IPv4 addresses only")
++	}
++	if err := e.check(destination.Addr.Unmap()); err != nil {
++		return nil, err
++	}
++	return client.ListenUDP(":0")
++}
++
++// The endpoint whose logger gets NetBird's log: logrus is process-wide, and a closed box's logger must not be kept.
++var logOwner struct {
++	sync.Mutex
++	endpoint *Endpoint
++}
++
++func setLogOwner(e *Endpoint) {
++	logOwner.Lock()
++	logOwner.endpoint = e
++	logOwner.Unlock()
++}
++
++func clearLogOwner(e *Endpoint) {
++	logOwner.Lock()
++	if logOwner.endpoint == e {
++		logOwner.endpoint = nil
++	}
++	logOwner.Unlock()
++}
++
++// processLog hands NetBird's log entries (one per write) to the current endpoint's logger, or drops them.
++type processLog struct{}
++
++func (processLog) Write(p []byte) (int, error) {
++	logOwner.Lock()
++	e := logOwner.endpoint
++	logOwner.Unlock()
++	if e != nil {
++		e.logger.Warn("netbird: ", strings.TrimSpace(string(p)))
++	}
++	return len(p), nil
++}
++
++// interfaces lists the phone's networks (Android reports them, the VPN's own left out) in NetBird's Android format.
++type interfaces struct{ network adapter.NetworkManager }
++
++func (i interfaces) IFaces() (string, error) {
++	var b strings.Builder
++	for _, it := range i.network.InterfaceFinder().Interfaces() {
++		f := it.Flags
++		fmt.Fprintf(&b, "%s %d %d %t %t %t %t %t |", it.Name, it.Index, it.MTU, f&net.FlagUp != 0, f&net.FlagBroadcast != 0,
++			f&net.FlagLoopback != 0, f&net.FlagPointToPoint != 0, f&net.FlagMulticast != 0)
++		for _, a := range it.Addresses {
++			b.WriteString(" " + a.String())
++		}
++		b.WriteString("\n")
++	}
++	return b.String(), nil
++}
+diff --git a/protocol/netbird/status.go b/protocol/netbird/status.go
+new file mode 100644
+index 0000000..6e553b0
+--- /dev/null
++++ b/protocol/netbird/status.go
+@@ -0,0 +1,188 @@
++package netbird
++
++import (
++	"encoding/json"
++	"net/netip"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/netbirdio/netbird/client/embed"
++)
++
++// The running endpoint, for the app's status screen: unbraid runs at most one.
++var current struct {
++	sync.Mutex
++	endpoint *Endpoint
++}
++
++func register(e *Endpoint) {
++	current.Lock()
++	current.endpoint = e
++	current.Unlock()
++}
++
++func unregister(e *Endpoint) {
++	current.Lock()
++	if current.endpoint == e {
++		current.endpoint = nil
++	}
++	current.Unlock()
++}
++
++type Status struct {
++	// State is "off", "starting", "running" or "failed".
++	State string `json:"state"`
++	Error string `json:"error,omitempty"`
++	IP    string `json:"ip,omitempty"`
++	FQDN  string `json:"fqdn,omitempty"`
++	// Network is the NetBird network this device is in (100.64.0.0/10 or a part of it).
++	Network string `json:"network,omitempty"`
++	// Routes are the networks behind routing peers that this device reaches.
++	Routes     []string   `json:"routes"`
++	Management bool       `json:"management"`
++	Peers      []Peer     `json:"peers"`
++	ExitNodes  []ExitNode `json:"exit_nodes"`
++}
++
++type Peer struct {
++	FQDN      string `json:"fqdn"`
++	IP        string `json:"ip"`
++	Connected bool   `json:"connected"`
++	Relayed   bool   `json:"relayed"`
++}
++
++type ExitNode struct {
++	ID string `json:"id"`
++	// Name is the routing peer's DNS name (the first one, when several serve it).
++	Name     string `json:"name"`
++	Selected bool   `json:"selected"`
++}
++
++// StatusJSON describes the running NetBird endpoint, or {"state":"off"}.
++func StatusJSON() string {
++	current.Lock()
++	e := current.endpoint
++	current.Unlock()
++	s := Status{State: "off"}
++	if e != nil {
++		s = e.status()
++	}
++	b, _ := json.Marshal(s)
++	return string(b)
++}
++
++func (e *Endpoint) status() Status {
++	e.access.Lock()
++	client, startErr, retrying := e.client, e.err, e.retrying
++	e.access.Unlock()
++	if client == nil {
++		switch {
++		case startErr == nil:
++			return Status{State: "starting"}
++		case retrying: // a network problem: tried again soon
++			return Status{State: "starting", Error: startErr.Error()}
++		default:
++			return Status{State: "failed", Error: startErr.Error()}
++		}
++	}
++	if client.Exited() {
++		return Status{State: "failed", Error: "NetBird stopped. Connect again; if it keeps stopping, this phone may have been removed from your NetBird network"}
++	}
++	// Running only with the current engine's network map: while it reconnects NetBird clears what it reported, and
++	// the app must keep the networks it routes, not take an empty map for the real one.
++	token := client.MapToken()
++	if token == nil {
++		return Status{State: "starting"}
++	}
++	// The recorder's state, without the health probes Status runs: polling must not wait on the network.
++	full := client.Snapshot()
++	s := Status{
++		State:      "running",
++		IP:         bareIP(full.LocalPeerState.IP),
++		FQDN:       strings.TrimSuffix(full.LocalPeerState.FQDN, "."),
++		Management: full.ManagementState.Connected,
++		Peers:      []Peer{},
++		ExitNodes:  []ExitNode{},
++		Routes:     []string{},
++	}
++	if p, err := netip.ParsePrefix(full.LocalPeerState.IP); err == nil {
++		s.Network = p.Masked().String()
++	}
++	prefixes, err := client.RoutedPrefixes()
++	if err != nil || s.Network == "" {
++		return Status{State: "starting"}
++	}
++	for _, p := range prefixes {
++		s.Routes = append(s.Routes, p.String())
++	}
++	names := map[string]string{}
++	for _, p := range full.Peers {
++		fqdn := strings.TrimSuffix(p.FQDN, ".")
++		names[p.PubKey] = fqdn
++		s.Peers = append(s.Peers, Peer{FQDN: fqdn, IP: bareIP(p.IP), Connected: p.ConnStatus == embed.PeerStatusConnected, Relayed: p.Relayed})
++	}
++	nodes, err := client.ExitNodes()
++	// Read last, then the same engine with its map checked again: never a mix of two engines' state.
++	if err != nil || client.MapToken() != token {
++		return Status{State: "starting"}
++	}
++	for _, n := range nodes {
++		x := ExitNode{ID: n.ID, Selected: n.Selected}
++		if len(n.Peers) > 0 {
++			x.Name = names[n.Peers[0]]
++		}
++		s.ExitNodes = append(s.ExitNodes, x)
++	}
++	return s
++}
++
++// hosts maps the DNS names of this device and its peers to their IPv4 addresses (the app looks names up for IPv4
++// only), from a snapshot at most a few seconds old; false while NetBird has no network map yet.
++func (e *Endpoint) hosts() (map[string][]netip.Addr, bool) {
++	e.access.Lock()
++	cache, at, cachedToken, client := e.hostsCache, e.hostsAt, e.hostsToken, e.client
++	e.access.Unlock()
++	var token any
++	if client != nil {
++		token = client.MapToken()
++	}
++	// Fresh and from the map running now; or, while a map is being applied (or NetBird reconnects), the last one read,
++	// however old: the names it knew beat an error for every lookup during a sync.
++	if cache != nil && (token == nil || token == cachedToken && at.After(time.Now().Add(-5*time.Second))) {
++		return cache, true
++	}
++	if token == nil {
++		return nil, false
++	}
++	full := client.Snapshot() // no network calls; built outside the lock, which dials and closes wait on
++	h := map[string][]netip.Addr{}
++	add := func(fqdn, ip string) {
++		if fqdn == "" {
++			return
++		}
++		name := strings.ToLower(strings.TrimSuffix(fqdn, ".")) + "."
++		if a, err := netip.ParseAddr(bareIP(ip)); err == nil && a.Is4() {
++			h[name] = append(h[name], a)
++		} else if _, ok := h[name]; !ok {
++			h[name] = nil // a known name without an IPv4 address: answered empty, not as unknown
++		}
++	}
++	add(full.LocalPeerState.FQDN, full.LocalPeerState.IP)
++	for _, p := range full.Peers {
++		add(p.FQDN, p.IP)
++	}
++	if client.MapToken() != token { // the engine changed meanwhile: this snapshot may mix two of them
++		return nil, false
++	}
++	e.access.Lock()
++	e.hostsCache, e.hostsAt, e.hostsToken = h, time.Now(), token
++	e.access.Unlock()
++	return h, true
++}
++
++// bareIP drops a prefix length: NetBird reports this peer's address as "100.64.0.1/16".
++func bareIP(s string) string {
++	ip, _, _ := strings.Cut(s, "/")
++	return ip
++}

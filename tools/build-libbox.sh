@@ -18,6 +18,20 @@ git apply "$ROOT"/tools/sing-box-*.patch
 BIN="$WORK/bin"
 rm -rf "$BIN" && mkdir -p "$BIN"
 export GOTOOLCHAIN=go1.26.11 GOBIN="$BIN" PATH="$BIN:$PATH"
+# NetBird's embeddable client for the NetBird endpoint: release v0.83.1 with unbraid's patches, used in place of the
+# published module. Its own replaces don't carry over to a module that requires it, so they are repeated here;
+# route53 1.6 is the release built for the libdns 1.x that sing-box uses.
+NB_PIN=499a86f4bc4795310ead5f06ecd5907e585acef4
+[ -d "$WORK/netbird" ] || git clone -q --depth 1 --branch v0.83.1 https://github.com/netbirdio/netbird.git "$WORK/netbird"
+[ "$(git -C "$WORK/netbird" rev-parse HEAD)" = $NB_PIN ] || git -C "$WORK/netbird" fetch -q --depth 1 origin tag v0.83.1
+git -C "$WORK/netbird" checkout -q -f $NB_PIN && git -C "$WORK/netbird" clean -qfd
+[ "$(git -C "$WORK/netbird" rev-parse HEAD)" = $NB_PIN ] || { echo "netbird checkout is not v0.83.1"; exit 1; }
+git -C "$WORK/netbird" apply "$ROOT"/tools/netbird-*.patch
+# Relative: an absolute path would end up in the built engine and differ between machines.
+go mod edit -replace github.com/netbirdio/netbird=../netbird \
+  -replace github.com/cloudflare/circl=codeberg.org/cunicu/circl@v0.0.0-20230801113412-fec58fc7b5f6 \
+  -replace github.com/mailru/easyjson=github.com/netbirdio/easyjson@v0.9.0
+go get github.com/netbirdio/netbird@v0.83.1 github.com/libdns/route53@v1.6.3
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/28.2.13676358}
 # gomobile needs a JDK; Android Studio ships one.
 export JAVA_HOME=${JAVA_HOME:-"/Applications/Android Studio.app/Contents/jbr/Contents/Home"}
@@ -25,6 +39,8 @@ go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13 github.com/sagernet
 for h in gomobile gobind; do
   go version -m "$BIN/$h" | grep -q "mod[[:space:]]*github.com/sagernet/gomobile[[:space:]]*v0.1.13" || { echo "$h in $BIN is not v0.1.13"; exit 1; }
 done
+# Every other version follows from the pinned go.mod files; this lets the bind record their checksums.
+export GOFLAGS=-mod=mod
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
 "$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
