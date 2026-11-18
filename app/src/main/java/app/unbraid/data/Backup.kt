@@ -418,7 +418,7 @@ object Backup {
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
-            r.nbExit?.let { need(it.isNotBlank() && it == it.trim() && it.length <= 253 && it.none(Char::isISOControl), "a NetBird route is damaged") }
+            r.nbExit?.let { need(it.isNotBlank() && it.length <= 253 && it.none(Char::isISOControl), "a NetBird route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
             need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && !r.meshExit)), "a route and its own server don't match")

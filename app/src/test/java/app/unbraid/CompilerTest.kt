@@ -117,6 +117,13 @@ class CompilerTest {
         // A damaged key is refused here, before the engine could quote it in an error.
         assertThrows(IllegalArgumentException::class.java) { run(s.copy(home = nbHome.copy(nbPrivateKey = "not-a-key"))) }
         assertThrows(IllegalArgumentException::class.java) { run(s.copy(home = nbHome.copy(nbManagementUrl = "http://nb.example.org"))) }
+        // A peer's exact name at or under a saved website: a stand-in address handed out before NetBird answered it is
+        // refused, so the app looks it up again; names below a peer's are not NetBird's and keep the website's rule.
+        @OptIn(app.unbraid.data.SavedSites::class) val sited = run(s.copy(sites = mapOf("nb.example.org" to "nl")),
+            names = listOf("box.nb.example.org", "phone.nb.example.org", "nas.other.example.net")).rules()
+        val stale = sited.filter { it["action"]?.jsonPrimitive?.content == "reject" && "package_name" !in it && "domain" in it && "domain_suffix" !in it }
+        assertEquals(listOf(listOf("box.nb.example.org", "phone.nb.example.org")), stale.map { r -> r["domain"]!!.jsonArray.map { it.jsonPrimitive.content } })
+        assertEquals(emptyList<JsonObject>(), run(s).rules().filter { it["action"]?.jsonPrimitive?.content == "reject" && "domain" in it && "domain_suffix" !in it && "package_name" !in it })
         // One exit node at a time.
         val two = s.copy(routes = s.routes + Route("nby", nbExit = "exit-other", hue = 4), apps = s.apps + ("com.m" to "nby"))
         assertThrows(IllegalArgumentException::class.java) { run(two) }

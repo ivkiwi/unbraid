@@ -244,6 +244,8 @@ object RestoreTraffic {
      * [s] compiled with stand-in tunnels for its provider routes (and, [given], for routes waiting for their config, as
      * once it is added), in situation [at]; null when the compiler refuses it. [kin]: the apps sharing a user id with an app.
      */
+    // shortcut: NetBird's map (its networks and peer names) is not known here, so paths to its peers aren't compared; pass
+    // the account's saved map ([Store.nbMap]) to both sides if a restore that moves apps off NetBird's peers must be said.
     fun compile(s: Setup, kin: (String) -> Set<String>, given: Boolean = false, at: Situation = Situation(false)): Config? = runCatching {
         val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
         val providers = s.activeRoutes.filter { !it.imported || (given && p.blocked[it.id] is LinkPicker.KeyLeftOut) }
@@ -798,7 +800,11 @@ object RestoreTraffic {
                 },
                 if (n.dns == c.dns) null else if (n.dns.isEmpty()) "$who no longer sets its own DNS servers." else "$who uses other DNS servers: ${n.dns.joinToString(", ") { shown(it) }}.",
             )
-        }.distinct()
+        }.plus(next.routes.filter { it.meshExit }.mapNotNull { n ->
+            // A Tailscale or NetBird exit route keeping its id but exiting through another device: both compile to the same tunnel.
+            val c = current.route(n.id)?.takeIf { it.meshExit && (it.tsExit != n.tsExit || it.nbExit != n.nbExit) } ?: return@mapNotNull null
+            "\"${shown(Backup.label(n.name, n.source, 256))}\" exits through another ${n.source} device: ${shown(n.tsName ?: n.tsExit ?: n.nbName ?: n.nbExit.orEmpty())} instead of ${shown(c.tsName ?: c.tsExit ?: c.nbName ?: c.nbExit.orEmpty())}."
+        }).distinct()
     }
 
     /**

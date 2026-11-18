@@ -155,7 +155,7 @@ class FakePoolTest {
     private fun input(block: Int, pending: Boolean = true) = Compiler.Input(setup, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
         1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"))
     private fun restore(last: Compiler.Input, block: Int?, spent: Int?, lockdown: Boolean = false, pending: Boolean = true, move: Boolean = false, kin: (Setup) -> Set<String> = { setOf("com.b") }) =
-        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin)
+        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin = kin)
 
     /**
      * A restore (also every move) runs what ran, with what may have changed since read again: a sibling of the blocked
