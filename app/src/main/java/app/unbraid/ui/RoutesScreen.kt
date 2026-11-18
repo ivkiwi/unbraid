@@ -917,8 +917,8 @@ private fun AppStack(ui: Ui, pkgs: List<String>, labels: Map<String, String>, ed
 
 @Composable
 private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String) -> Unit) {
-    val via = listOfNotNull("Tailscale".takeIf { home.tailscale }, "NetBird".takeIf { home.netbird && home.netbirdReady }).joinToString(" + ")
-        .ifEmpty { "WireGuard · ${home.wg?.endpoint?.substringBeforeLast(':').orEmpty()}" }
+    val via = listOfNotNull("Tailscale".takeIf { home.tailscale }, "NetBird".takeIf { home.netbird && home.netbirdReady },
+        home.wg?.let { "WireGuard · ${it.endpoint.substringBeforeLast(':')}" }).joinToString(" + ")
     Column(
         Modifier.padding(start = Gutter, end = Gutter, top = 12.dp).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Ink.homeSurface)
             .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -931,7 +931,7 @@ private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String
             // Laid out like the route rows: the chip closes the row on the right.
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text("Home network", style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(listOfNotNull(via, home.subnets.joinToString(", ").ifBlank { null }).joinToString(" · "), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(listOfNotNull(via, home.subnets.takeIf { home.tailscale }?.joinToString(", ")?.ifBlank { null }).joinToString(" · "), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Slot { RouteMark("HM", if (lit) Ink.route(3) else Ink.dim, Modifier.clearAndSetSemantics {}, hops = 0) }
         }
