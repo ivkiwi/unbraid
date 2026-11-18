@@ -318,7 +318,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val running = vpn.phase == Phase.On || vpn.phase == Phase.Paused
     val onOff = { b: Boolean -> if (b) "on" else "off" }
     val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
-    val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
+    val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "NetBird".takeIf { home.netbird && home.netbirdReady }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
 
     // A key's setup minute ends while Providers & servers may stay open.
     var tick by remember { mutableStateOf(0) }
@@ -454,7 +454,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             pr.configHelp?.let { (text, url) -> Item("In your ${pr.name} account", text, { context.openUrl(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
                         ))
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
-                        accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
+                        accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale && !home.netbirdReady -> "It's your only connection: you'll be back at sign-in"
                         routes.isEmpty() -> "No route uses it"
                         else -> "Apps on its routes are blocked until you sign in again or move them; other routes keep running"
                     }, { dialog = "signout:${pr.id}" }, danger = true)))
