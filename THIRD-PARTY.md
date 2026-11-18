@@ -41,7 +41,7 @@ These are part of Android itself. The app uses them but doesn't include them.
 
 | Component | Used for | Licence |
 |---|---|---|
-| Android Keystore | Holds the key that encrypts saved logins, keys and Tailscale state on the phone | Part of Android |
+| Android Keystore | Holds the key that encrypts saved logins, keys, Tailscale state and the NetBird device key on the phone | Part of Android |
 | Android's platform cryptography, usually [Conscrypt](https://github.com/google/conscrypt), built on [BoringSSL](https://boringssl.googlesource.com/boringssl/) | AES-256-GCM, HMAC-SHA256 and SHA-256, including for backup files | Conscrypt: Apache-2.0. BoringSSL: its own licence, which depends on the version in your Android |
 
 No cryptography library is bundled for backups. The scrypt function that turns a backup passphrase into keys
