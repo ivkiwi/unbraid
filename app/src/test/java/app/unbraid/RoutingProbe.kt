@@ -50,14 +50,21 @@ object RoutingProbe {
         return exact.orEmpty().any { it == name } || suffix.orEmpty().any { if (it.startsWith(".")) name.endsWith(it) else name == it || name.endsWith(".$it") }
     }
 
-    /** The resolver or action that answers [app]'s lookup of [name] for record [type]. */
+    /** The resolver or action that answers [app]'s lookup of [name] for record [type], asked from the tunnel; "" for an app Android doesn't name. */
     fun lookup(dns: JsonObject, app: String, name: String, type: String): String {
-        for (r in dns["rules"]!!.jsonArray.map { it.jsonObject }) {
-            val unknown = r.keys - setOf("domain", "domain_suffix", "package_name", "query_type", "server", "action", "rcode", "rewrite_ttl")
+        fun match(r: JsonObject): Boolean {
+            if (r.text("type") == "logical") {
+                val all = r["rules"]!!.jsonArray.map { match(it.jsonObject) }
+                return (if (r.text("mode") == "and") all.all { it } else all.any { it }) != (r.text("invert") == "true")
+            }
+            val unknown = r.keys - setOf("domain", "domain_suffix", "package_name", "package_name_regex", "invert", "inbound", "query_type", "server", "action", "rcode", "rewrite_ttl")
             check(unknown.isEmpty()) { "DNS rule field the probe can't read: $unknown" }
-            if (named(r, name) == false) continue
-            if (r.list("package_name")?.contains(app) == false) continue
-            if (r.list("query_type")?.contains(type) == false) continue
+            val hit = named(r, name) != false && r.list("package_name")?.contains(app) != false && r.list("query_type")?.contains(type) != false &&
+                r.list("package_name_regex")?.any { Regex(it).containsMatchIn(app) } != false && r.list("inbound")?.contains("tun") != false
+            return hit != (r.text("invert") == "true")
+        }
+        for (r in dns["rules"]!!.jsonArray.map { it.jsonObject }) {
+            if (!match(r)) continue
             return when (r.text("action")) { null, "route" -> r.text("server")!!; "predefined" -> "empty"; else -> r.text("action")!! }
         }
         return dns.text("final")!!
