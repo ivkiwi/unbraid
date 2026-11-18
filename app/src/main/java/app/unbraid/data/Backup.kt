@@ -337,7 +337,9 @@ object Backup {
     /** Letters, digits and the dots shown for a country without a code: nothing a request could read as its own. */
     private val CODE = Regex("[\\p{L}\\p{N}·]{0,3}")
     fun shown(s: Setup) = s.copy(routes = s.routes.map(::shown), favorites = s.favorites.map(::shown))
-    fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) }, nbName = r.nbName?.let { safe(it, SHOWN) })
+    fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) },
+        // A NetBird route without a name shows its network ID, which only refuses control characters: named by it, cleaned.
+        nbName = (r.nbName ?: r.nbExit)?.let { safe(it, SHOWN) })
     fun shown(l: Location) = l.copy(countryCode = l.countryCode?.takeIf(CODE::matches), group = l.group?.takeIf(ID::matches),
         pinned = l.pinned?.run { copy(city = safe(city, SHOWN), country = safe(country, SHOWN)) })
 
@@ -521,7 +523,7 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
         (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
+            route(x.id)?.takeIf { it.own == null && it.imported && !it.meshExit && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
         })?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(

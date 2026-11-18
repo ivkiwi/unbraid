@@ -478,7 +478,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 if (shown.apps.values.all { it == shown.defaultRoute } && sitesBy.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
                     Text("All apps use the default route. Tap + to send some apps through another route.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
-                if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
+                if (setup.home.tailscale || setup.home.netbird && setup.home.netbirdReady || setup.home.wg != null) item(key = "home") {
                     HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
                 }
                 if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
@@ -917,7 +917,8 @@ private fun AppStack(ui: Ui, pkgs: List<String>, labels: Map<String, String>, ed
 
 @Composable
 private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String) -> Unit) {
-    val via = if (home.tailscale) "Tailscale" else "WireGuard · ${home.wg?.endpoint?.substringBeforeLast(':').orEmpty()}"
+    val via = listOfNotNull("Tailscale".takeIf { home.tailscale }, "NetBird".takeIf { home.netbird && home.netbirdReady }).joinToString(" + ")
+        .ifEmpty { "WireGuard · ${home.wg?.endpoint?.substringBeforeLast(':').orEmpty()}" }
     Column(
         Modifier.padding(start = Gutter, end = Gutter, top = 12.dp).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Ink.homeSurface)
             .padding(horizontal = 16.dp, vertical = 12.dp),

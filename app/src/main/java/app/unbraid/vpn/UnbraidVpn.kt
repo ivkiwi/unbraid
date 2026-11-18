@@ -727,7 +727,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
         lastBlock = input.fakeBlock; lastNoted = true
         lastInput = input
-        state.update { it.copy(tsSuffix = input.tsSuffix) }
+        // A route left out (a NetBird account gone since) shows as without a tunnel, not as running its old one.
+        state.update { it.copy(tsSuffix = input.tsSuffix, servers = it.servers.filterKeys { k -> k in input.links }) }
         openTable(true)
     }) { input, json ->
         Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }

@@ -43,7 +43,7 @@ class OlderBackupsTest {
         k.keyless && phone.servers.none { !it.keyless && it.id == k.id && k.sameAs(it) }
     }.mapNotNull { k ->
         file.routes.filter { it.own == k.id }.firstNotNullOfOrNull { x ->
-            phone.route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }
+            phone.route(x.id)?.takeIf { it.own == null && it.imported && !it.meshExit && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }
                 ?.takeIf { k.ovpn == null && stripped(it) == k }
         }?.let { k.id to it }
     }.fold(expected) { s, (id, sv) -> s.refilled(id, sv) ?: s }
