@@ -260,6 +260,8 @@ class SitesTest {
     @Test fun onlyASetupWithWebsitesIsSavedInTheNewFormat() {
         assertEquals(3, setup.stamped.version)
         assertEquals(2, setup.copy(sites = emptyMap()).stamped.version)
+        // A NetBird route needs the newest format: an older app would read it as a provider route.
+        assertEquals(VERSION, setup.copy(routes = setup.routes + app.unbraid.data.Route("nbx", nbExit = "exit-home")).stamped.version)
         assertEquals(3, setup.copy(sites = emptyMap(), profiles = listOf(Profile("P", "nl", sites = mapOf("a.com" to "nl")))).stamped.version)
         val dir = tmp.newFolder()
         val store = Store(dir) { key }
@@ -268,9 +270,10 @@ class SitesTest {
         assertEquals(VERSION, saved().version) // read back as the current format, whatever the file says
         assertTrue(store.update { it.site(null, "example.com", "it") })
         assertEquals(mapOf("example.com" to "it"), saved().sites)
-        // Backups likewise: 2 without a website (an older build restores it), 3 with one.
+        // Backups likewise: 2 without a website (an older build restores it), 3 with one, 5 with a NetBird route.
         fun stamp(s: Setup) = Json.parseToJsonElement(String(Backup.export(s, "2.10.0", 0))).jsonObject["setup"]!!.jsonObject.text("version")
         assertEquals("2", stamp(setup.copy(sites = emptyMap()))); assertEquals("3", stamp(setup))
+        assertEquals("$VERSION", stamp(setup.copy(routes = setup.routes + app.unbraid.data.Route("nbx", nbExit = "exit-home"))))
     }
 
     @Test fun backupsCarryAndCheckWebsites() {

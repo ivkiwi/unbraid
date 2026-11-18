@@ -15,6 +15,7 @@ import app.unbraid.data.Setup
 import app.unbraid.data.VERSION
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -177,6 +178,26 @@ class FakePoolTest {
         assertFalse(restore(input(3), null, 3, lockdown = false).lockdown) // today's, as a reload would compile it
         assertEquals(true, restore(input(3), null, 3).tsLoginPending)
         assertEquals(false, FakePool.restoreInput(input(3, pending = false), null, 3, 2 to "new", null, null, false, true, false) { emptySet() }.tsLoginPending)
+    }
+
+    /** A restore or a move never brings back a NetBird account signed out of or replaced since: NetBird is left out, its routes wait. */
+    @Test fun aRestoreNeverRunsANetbirdAccountGoneSince() {
+        val nb = setup.copy(home = Home(netbird = true, nbManagementUrl = "https://nb.example.org", nbPrivateKey = "old-key"),
+            routes = setup.routes + Route("nbx", nbExit = "exit-home", nbName = "box"))
+        val last = Compiler.Input(nb, mapOf("nbx" to app.unbraid.data.NbLink(app.unbraid.data.Server("box", "exit-home", "", "", 0))), "app.unbraid", false,
+            "/tmp/ts", "/tmp/cache.db", "old.ts.net", 1 to "old", 3, setOf("nl"), nbNetworks = listOf("100.101.0.0/16"), nbNames = listOf("box.netbird.cloud"))
+        for (move in listOf(false, true)) {
+            val same = FakePool.restoreInput(last, null, 3, 2 to "new", null, null, false, false, move, nb.home.nbAccount) { emptySet() }
+            assertTrue(same.setup.netbird); assertEquals(last.links, same.links); assertEquals(last.nbNetworks, same.nbNetworks)
+            for (now in listOf(null, nb.home.copy(nbPrivateKey = "new-key").nbAccount)) {
+                val r = FakePool.restoreInput(last, null, 3, 2 to "new", null, null, false, false, move, now) { emptySet() }
+                assertFalse(r.setup.netbird); assertNull(r.setup.home.nbPrivateKey); assertNull(r.setup.home.nbAccount)
+                assertTrue("nbx" in r.blocked); assertFalse("nbx" in r.links)
+                assertEquals(emptyList<String>(), r.nbNetworks); assertEquals(emptyList<String>(), r.nbNames)
+            }
+        }
+        // Left out, it keeps what ran.
+        assertEquals(last.nbNetworks, FakePool.restoreInput(last, null, 3, 2 to "new", null, null, false, false, false) { emptySet() }.nbNetworks)
     }
 
     /**
@@ -348,7 +369,7 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
-        assertTrue(vpn.contains("tsLoginPending, move) { blockedKin(it) }"))
+        assertTrue(vpn.contains("tsLoginPending, move, store.setup.value.home.nbAccount) { blockedKin(it) }"))
         // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
         assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))

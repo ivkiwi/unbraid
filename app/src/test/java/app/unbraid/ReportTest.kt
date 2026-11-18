@@ -23,6 +23,7 @@ class ReportTest {
         "SECRET-NAME", "wgPRIVATEkey", "wgPUBLICkey", "10.66.66.2", "vpn.secret-host.example", "51820", "OVPN-PASS", "ovpn-user", "ss-passw0rd", "ss.secret-host.example",
         "com.secret.app", "100.64.1.9", "tailnet-secret.ts.net", "TS-AUTH-KEY", "1.2.3.4", "dns.secret.example", "headscale.secret.example", "Home-WiFi", "SECRET-ERROR",
         "SECRET-REGION", "secretcity", "nl9999", "profile-secret",
+        "exit-SECRET-NB", "nb.secret.example", "NB-SETUP-KEY", "NB-DEVICE-KEY", "nb-secret.example", "100.101.9.9",
     )
 
     private val wg = WgPeer("SECRET-NAME wg", "wgPRIVATEkey", listOf("10.66.66.2/32"), "wgPUBLICkey", "wgPRESHARED", "vpn.secret-host.example:51820", listOf("0.0.0.0/0"), listOf("dns.secret.example"))
@@ -36,15 +37,18 @@ class ReportTest {
             Route("f", Location("secret-provider-id", countryCode = "<script>", region = "SECRET-REGION")),
             Route("g", Location("mullvad", countryCode = "se")),
             Route("h", Location("nord", countryCode = "DE")),
+            Route("i", nbExit = "exit-SECRET-NB", nbName = "SECRET-NAME nb"),
         ),
         defaultRoute = "a",
         apps = mapOf("com.secret.app" to "b", "com.secret.two" to "b", "com.secret.three" to DIRECT, "com.secret.four" to "d"),
-        home = Home(tailscale = true, tsAuthKey = "TS-AUTH-KEY", tsControlUrl = "https://headscale.secret.example", subnets = listOf("192.168.1.0/24"), tsSuffixAllowed = "tailnet-secret.ts.net"),
+        home = Home(tailscale = true, tsAuthKey = "TS-AUTH-KEY", tsControlUrl = "https://headscale.secret.example", subnets = listOf("192.168.1.0/24"), tsSuffixAllowed = "tailnet-secret.ts.net",
+            netbird = true, nbManagementUrl = "https://nb.secret.example", nbSetupKey = "NB-SETUP-KEY", nbPrivateKey = "NB-DEVICE-KEY"),
         prefs = Prefs(customDns = listOf("dns.secret.example"), filter = Filter("own", "https://dns.secret.example/dns-query", routes = true)),
         profiles = listOf(app.unbraid.data.Profile("profile-secret", "a")), profile = "profile-secret",
     )
     private val vpn = VpnState(
         phase = VpnState.Phase.On, error = "SECRET-ERROR Home-WiFi 1.2.3.4", tsState = "SECRET-ERROR", stuck = mapOf("nord" to true, "mullvad" to false),
+        nb = app.unbraid.vpn.NbStatus(state = "failed", error = "SECRET-ERROR nb", ip = "100.101.9.9", fqdn = "phone.nb-secret.example"),
         notAnswering = setOf("c"), dropping = setOf("d"), servers = mapOf("a" to Server("nl9999", "nl9999.secret-host.example", "1.2.3.4", "k", 1)),
     )
 

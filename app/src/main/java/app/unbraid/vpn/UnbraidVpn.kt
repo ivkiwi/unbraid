@@ -51,6 +51,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
@@ -84,6 +85,8 @@ data class VpnState(
     val tsAnnounced: String? = null,
     /** Tailnet peers that offer themselves as exit nodes. */
     val tsExitNodes: List<TsNode> = emptyList(),
+    /** The built-in NetBird client, while it runs. */
+    val nb: NbStatus? = null,
     /** While paused: when the connection comes back (epoch ms), 0 = only when resumed by hand. */
     val pausedUntil: Long = 0,
     /** While paused: when the pause began (epoch ms), for the countdown ring. */
@@ -306,6 +309,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var tun: ParcelFileDescriptor? = null
     private var watch: Job? = null
     private var ts: TailscaleStatusSubscription? = null
+    private var nbWatch: Job? = null
+    /** NetBird's networks and peer names as last reported while running: kept through its restart on each reload. */
+    @Volatile private var nbNetworks: List<String> = emptyList()
+    @Volatile private var nbNames: List<String> = emptyList()
     private var resume: Job? = null
 
     override fun onCreate() {
@@ -500,6 +507,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             AfterUpdate.on(this)
             notify(setup)
             if (setup.tailscale) watchTailscale()
+            if (setup.netbird && nbWatch == null) watchNetbird()
             // Anything edited while connecting is picked up here: only the applied setup is skipped.
             // Setup edits and sign-ins/outs both change what the engine must run.
             // From the Block setting the tunnel was built with, not Android's now: one turned on or off during the start
@@ -631,7 +639,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
-        tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
+        tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG } +
+            setup.activeRoutes.filter { it.nbExit != null && it.id !in blocked }.associate { it.id to Compiler.NB_TAG }
         val was = running
         running = setup
         val eligibleImports = setup.activeRoutes.filter { it.imported && Health.eligible(it) && it.id in links }.map { it.id }.toSet()
@@ -709,7 +718,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         runCatching {
             // A move runs what runs: saved settings aren't read for it.
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
-                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move) { blockedKin(it) }
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, store.setup.value.home.nbAccount) { blockedKin(it) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { store.fakeBlock = it }, commit = { input ->
@@ -847,6 +856,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked), stuck = stuck(setup, picked.blocked)) }
         notify(setup)
         if (setup.tailscale && ts == null) watchTailscale()
+        if (setup.netbird && nbWatch == null) watchNetbird()
         true
     } catch (e: Exception) {
         Log.e(TAG, "reload: ${logLine(e)}")
@@ -854,7 +864,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
         val restarted = restarting
-        val restored = !restarted || restoreLastGood(srv) == FakePool.Outcome.Ran
+        // An engine still running a NetBird account signed out of or replaced since must not stay as it is: the last
+        // good config comes back without that account ([FakePool.restoreInput]), else the VPN stops.
+        val staleNb = lastInput?.setup?.let { it.netbird && it.home.nbAccount != store.setup.value.home.nbAccount } == true
+        val restored = (!restarted && !staleNb) || restoreLastGood(srv, gone = restarted) == FakePool.Outcome.Ran
         restarting = false
         // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
         // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
@@ -1098,8 +1111,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** The network [portStep] was learned on. */
     private var portNet: android.net.Network? = null
 
-    private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
+    /** The NetBird account [nbNetworks] belong to: another one starts from what it reported itself, or from nothing. */
+    private var nbAccount: String? = "none yet"
+
+    private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe): Compiler.Input {
+        val account = setup.home.nbAccount
+        if (account != nbAccount) {
+            nbAccount = account
+            // What this account last reported, so its networks are routed from the first packet; another's never.
+            NbStatus.parse(store.nbMap(setup.home.nbAccount)).let { nbNetworks = it.networks; nbNames = it.names }
+        }
+        return Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup),
+            nbNetworks = nbNetworks, nbNames = nbNames)
+    }
 
     /**
      * The apps on Direct that another app of their Android user id keeps inside ([Compiler.Input.blockedKin]). An app that
@@ -1163,6 +1187,65 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         }.onFailure { Log.w(TAG, "tailscale status: ${logLine(it)}") }.getOrNull()
     }
 
+    /**
+     * Polls the NetBird client while the engine runs: its peers and exit nodes for the screens, and its networks and
+     * peer names for the engine, which reloads when they change (they are known only once NetBird runs).
+     */
+    private fun watchNetbird() {
+        nbWatch = scope.launch {
+            val me = coroutineContext[Job]
+            var asked: Pair<List<String>, List<String>>? = null
+            var retryAt = 0L
+            var namesAt = 0L
+            var cached: Any? = null
+            class Ask(val gen: Int, val account: String, val key: String?)
+            while (true) {
+                // Taken under the lock: which engine (and account and setup key) this poll is for. Stopping happens here
+                // too, so a NetBird turned on again meanwhile keeps this poller instead of losing it.
+                val ask = lock.withLock {
+                    if (!store.setup.value.netbird) {
+                        if (nbWatch === me) { nbWatch = null; state.update { it.copy(nb = null) } }
+                        return@launch
+                    }
+                    lastInput?.setup?.home?.let { h -> h.nbAccount?.takeIf { it == store.setup.value.home.nbAccount }?.let { Ask(generation, it, h.nbSetupKey) } }
+                        // The engine runs no NetBird of this account (rolled back, or not applied yet): nothing of another shows.
+                        ?: run { state.update { it.copy(nb = null) }; null }
+                }
+                if (ask == null) { delay(5_000); continue } // the engine doesn't run this account (yet)
+                val raw = runCatching { Libbox.netbirdStatus() }.getOrNull()
+                val st = NbStatus.parse(raw)
+                var want: Pair<List<String>, List<String>>? = null
+                lock.withLock {
+                    // Applied only to the engine it was asked of: a reload or a change of account since drops it.
+                    if (ask.gen != generation || store.setup.value.home.nbAccount != ask.account) return@withLock
+                    state.update { it.copy(nb = st.takeIf { s -> s.state != "off" }) }
+                    if (!st.running) return@withLock
+                    // Registered: the setup key that this engine signed in with isn't needed again, so it isn't kept.
+                    ask.key?.takeIf { it == store.setup.value.home.nbSetupKey }?.let { used -> store.update { s -> if (s.home.nbSetupKey == used && s.home.nbAccount == ask.account) s.copy(home = s.home.copy(nbSetupKey = null)) else s } }
+                    nbNetworks = st.networks
+                    nbNames = st.names
+                    // Kept for the next start (routed from its first packet) and the picker; written only when it changed.
+                    val map = listOf(ask.account, st.networks, st.names, st.exitNodes.map { it.id to it.name })
+                    if (map != cached && raw != null && store.saveNbMap(ask.account, raw)) cached = map
+                    // Only a change the engine's rules use (home access on): one that leaves the config as it is asks
+                    // nothing, and a reload that didn't apply is tried again later, not on every poll.
+                    val used = Compiler.nbUsed(nbNetworks, nbNames)
+                    val runs = lastInput?.let { Compiler.nbUsed(it.nbNetworks, it.nbNames) }
+                    // A change of names alone (peers come and go) restarts every tunnel too: at most every few minutes.
+                    val now = System.currentTimeMillis()
+                    val soon = used.first != runs?.first || now >= namesAt
+                    if (store.setup.value.home.netbird && used != runs && soon && (used != asked || now >= retryAt)) { want = used; namesAt = now + 5 * 60_000 }
+                }
+                want?.let { w ->
+                    asked = w
+                    reload() // takes the lock itself
+                    if (lastInput?.let { Compiler.nbUsed(it.nbNetworks, it.nbNames) } != w) retryAt = System.currentTimeMillis() + 60_000
+                }
+                delay(5_000)
+            }
+        }
+    }
+
     /** Counts connections ended ([stopEngine]): a stop from outside applies only to the one it was sent for. */
     @Volatile private var session = 0
     /** Android or the engine ended the connection: said, like a failed connect, unless that one had already ended. */
@@ -1181,6 +1264,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         session++
         retry?.cancel(); retry = null; retryTicket++; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
+        nbWatch?.cancel(); nbWatch = null
+        state.update { it.copy(nb = null) }
         tsLoginPending = false
         holding = false
         runCatching { server?.closeService() }

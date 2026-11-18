@@ -439,5 +439,5 @@ internal fun RouteTiles(tiles: List<Tile>, ticked: String?, note: String?, inden
 
 /** A route as a tile: the tiles of every profile route, in the order an app's menu shows them. */
 internal fun routeTiles(setup: Setup, offered: List<app.unbraid.data.Route>) = offered.sortedByDescending { it.id == setup.defaultRoute }.map {
-    Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
+    Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.meshExit) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
 } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile(BLOCK, "Block", Icons.block, Ink.bad, tinted = false, sub = "No traffic")

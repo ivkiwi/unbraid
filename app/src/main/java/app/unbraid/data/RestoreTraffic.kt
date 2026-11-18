@@ -199,7 +199,7 @@ object RestoreTraffic {
         private fun all(r: JsonObject, key: String): List<JsonElement> = listOfNotNull(r[key]) + (r["rules"] as? JsonArray).orEmpty().flatMap { all(it as? JsonObject ?: return@flatMap emptyList(), key) }
 
         /** The ranges an address rule sends through a home tunnel, and those it lets go to the local network straight. */
-        val home = rules.filter { it.str("outbound") == "home-wg" || it.str("outbound") == Compiler.TS_TAG }.flatMapTo(HashSet()) { strings(it["ip_cidr"]) }
+        val home = rules.filter { it.str("outbound").let { o -> o == "home-wg" || o == Compiler.TS_TAG || o == Compiler.NB_TAG } }.flatMapTo(HashSet()) { strings(it["ip_cidr"]) }
         val local = (excluded + rules.filter { it.str("outbound") == DIRECT_TAG && "ip_cidr" in it }.flatMap { strings(it["ip_cidr"]) }).toHashSet()
     }
 
@@ -774,7 +774,7 @@ object RestoreTraffic {
             return Exit(key, name, host, remotes.map { it.lowercase() }, wg?.publicKey, wg?.dns.orEmpty())
         }
         return s.servers.filter { !it.keyless }.map { exit("s:" + it.id, it.name, it.wg, it.ovpn, it.ss) } +
-            s.routes.filter { it.imported && it.tsExit == null && !it.keyless }.map { exit("r:" + it.id, it.name, it.wg, it.ovpn, it.ss) } +
+            s.routes.filter { it.imported && !it.meshExit && !it.keyless }.map { exit("r:" + it.id, it.name, it.wg, it.ovpn, it.ss) } +
             listOfNotNull(s.home.wg?.let { exit("home", "", it, null, null) })
     }
 

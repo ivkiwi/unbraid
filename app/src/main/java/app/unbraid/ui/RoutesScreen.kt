@@ -201,6 +201,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
     r.tsExit != null -> "Tailscale exit node"
+    r.nbExit != null -> "NetBird exit node"
     else -> listOfNotNull(
         r.source,
         NordGroups.firstOrNull { it.first != null && it.first == r.loc.group }?.second.takeIf { r.loc.provider == "nord" },

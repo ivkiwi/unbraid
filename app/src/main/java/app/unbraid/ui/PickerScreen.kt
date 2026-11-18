@@ -209,7 +209,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val protocol = protocolChoice.takeIf { c -> c != null && protocolOwner == provider && (protocols.any { it.first == c } || c == openingProtocol && current?.provider == provider) }?.takeIf { provider != "nord" || group !in Nord.openVpnOnly || it.startsWith("openvpn") }
         ?: "openvpn_udp".takeIf { provider == "nord" && group in Nord.openVpnOnly }
     // A route that already uses a Tailscale exit node or a saved server opens on "Own servers".
-    var mine by rememberSaveable { mutableStateOf(route?.imported == true || provider == null && (setup.tailscale || setup.servers.isNotEmpty())) }
+    var mine by rememberSaveable { mutableStateOf(route?.imported == true || provider == null && (setup.tailscale || setup.home.netbirdReady || setup.servers.isNotEmpty())) }
     var allOpen by rememberSaveable { mutableStateOf(false) }
     var sheet by rememberSaveable { mutableStateOf<String?>(null) } // "options" or "c:<country id>"
     // Specialty groups exist in a few countries only: list just those.
@@ -360,6 +360,42 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         typed?.let { t -> item(key = "tsTyped") { GroupRow(0, 1, "Use $t", "As this route's Tailscale exit node", onClick = { exit(t, t) }, trailing = { Chevron() }) } }
     }
 
+    // NetBird exit nodes, from the running client; one at a time, like Tailscale's.
+    val cachedNb = remember { ui.nbCachedExits() }
+    // The live map when NetBird runs (no exit nodes there means none); what it last offered when it doesn't.
+    val nbNodes = vpn.nb?.takeIf { it.running }?.exitNodes ?: cachedNb
+    fun pickNb(id: String, name: String) {
+        ui.nbLock(id)?.let { lock ->
+            tsNote = "${setup.profile ?: "The setup in use"} uses the NetBird exit node ${lock.name}. NetBird uses one exit node at a time: pick that one here, or this one once this profile is in use."
+            return
+        }
+        once {
+            val route = ui.addNbExit(target, id, name)
+            // The setup in use: the route just given that node becomes its default (a profile not in use does that itself).
+            if (target == "default" && draft == null) route?.let(ui::setDefault)
+            close()
+        }
+    }
+
+    fun LazyListScope.netbird(list: List<app.unbraid.vpn.NbStatus.ExitNode>, typed: String? = null) {
+        if (!setup.home.netbirdReady) return
+        val used = setup.routes.firstOrNull { it.nbExit != null }
+        item(key = "nbLabel") { SectionLabel("NetBird exit node") }
+        val note = listOfNotNull(
+            "Connect to see the exit nodes your NetBird network offers.".takeIf { nbNodes.isEmpty() },
+            "One exit node at a time. Choosing another replaces ${used?.name}.".takeIf { used != null },
+        ).joinToString(" ")
+        if (note.isNotEmpty()) item(key = "nbNote") { Caption(note) }
+        itemsIndexed(list, key = { _, n -> "nb:${n.id}" }) { i, n ->
+            GroupRow(
+                i, list.size, n.label, n.id, Ink.text, { pickNb(n.id, n.label) },
+                trailing = { if (route?.nbExit == n.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) },
+            )
+        }
+        // An exit node NetBird hasn't listed here yet (not connected, or just added) can still be named by its network ID.
+        typed?.let { t -> item(key = "nbTyped") { GroupRow(0, 1, "Use $t", "As this route's NetBird exit node", onClick = { pickNb(t, t) }, trailing = { Chevron() }) } }
+    }
+
     fun LazyListScope.saved(list: List<OwnServer>) {
         if (list.isEmpty()) return
         item(key = "savedLabel") { SectionLabel("Saved servers") }
@@ -391,8 +427,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.myServers() {
         tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } }
         tailscale(nodes)
+        netbird(nbNodes)
         saved(setup.servers)
-        settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
+        settingsNote(empty = !setup.tailscale && !setup.home.netbirdReady && setup.servers.isEmpty())
     }
 
     fun LazyListScope.noProvider() = item(key = "noProvider") {
@@ -405,11 +442,16 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     // Search covers the open tab: favourites, countries and cities, or devices and saved servers.
     fun LazyListScope.results() {
         if (mine) {
+            tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } } // why a tap did nothing, while searching too
             val devices = nodes.filter { hit(it.name) || hit(it.ip) }
             val own = setup.servers.filter { hit(it.name) || hit(it.kind) }
             val typed = query.takeIf { setup.tailscale && validNode(it) && vpn.tsExitNodes.none { n -> n.ip == it || n.name.equals(it, true) } }
-            if (devices.isEmpty() && own.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
+            val nbHits = nbNodes.filter { hit(it.label) || hit(it.id) }
+            // Network IDs may have spaces ("Exit Node (raspberrypi)"); the query is already trimmed.
+            val nbTyped = query.takeIf { setup.home.netbirdReady && it.isNotEmpty() && it.length <= 253 && it.none(Char::isISOControl) && nbNodes.none { n -> n.id == it } }
+            if (devices.isEmpty() && own.isEmpty() && typed == null && nbHits.isEmpty() && nbTyped == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
             if (devices.isNotEmpty() || typed != null) tailscale(devices, searching = true, typed = typed)
+            if (nbHits.isNotEmpty() || nbTyped != null) netbird(nbHits, nbTyped)
             saved(own)
             return
         }
@@ -438,6 +480,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         title = route?.name ?: "Choose a location",
         sub = when {
             route?.tsExit != null -> "Tailscale exit node"
+            route?.nbExit != null -> "NetBird exit node"
             route?.imported == true -> "Your own server"
             target == "default" -> "Apps that follow the default go where you pick"
             current == null -> "Pick where this route exits"

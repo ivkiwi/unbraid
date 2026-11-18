@@ -68,12 +68,20 @@ object FakePool {
      * After a failed change ([move] false) what may have changed since is read again as [Compiler.Input] reads it now:
      * tailnet DNS authority as saved ([tsSuffixAllowed]), the tailnet's DNS suffix and Android's Block setting. A move
      * and its retry keep what runs: a change the engine refused before the old one was given up stays refused.
+     * Either way never as a NetBird account signed out of or replaced since ([nbAccount], the saved one): NetBird is
+     * left out and its routes wait, as they would on a reload.
      */
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val setup = if (move) last.setup else last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
-        return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()))
+                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, nbAccount: String? = last.setup.home.nbAccount,
+                     kin: (Setup) -> Set<String>): Compiler.Input {
+        val sameNb = nbAccount == last.setup.home.nbAccount
+        val nbGone = if (sameNb) emptySet() else last.setup.routes.filter { it.nbExit != null }.mapTo(HashSet()) { it.id }
+        val home = (if (move) last.setup.home else last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+            .let { if (sameNb) it else it.copy(netbird = false, nbManagementUrl = null, nbSetupKey = null, nbPrivateKey = null) }
+        val setup = last.setup.copy(home = home)
+        return Compiler.Input(setup, last.links - nbGone, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked + nbGone, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()),
+            nbNetworks = if (sameNb) last.nbNetworks else emptyList(), nbNames = if (sameNb) last.nbNames else emptyList())
     }
 
     /**

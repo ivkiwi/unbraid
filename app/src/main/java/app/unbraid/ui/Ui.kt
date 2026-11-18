@@ -23,6 +23,7 @@ import app.unbraid.support.Report
 import app.unbraid.data.DIRECT
 import app.unbraid.stats.Stats
 import app.unbraid.data.Home
+import app.unbraid.data.WgKeys
 import app.unbraid.data.Http
 import app.unbraid.data.Location
 import app.unbraid.data.Manual
@@ -157,7 +158,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Signed in to at least one provider, or holding an imported config. */
     val accounts = store.accounts
     // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
-    private val _signedIn = MutableStateFlow(store.accounts.value.isNotEmpty() || store.setup.value.routes.any { it.imported } || store.setup.value.servers.isNotEmpty() || store.setup.value.home.tailscale || vpn.value.phase != VpnState.Phase.Off)
+    private val _signedIn = MutableStateFlow(store.accounts.value.isNotEmpty() || store.setup.value.routes.any { it.imported } || store.setup.value.servers.isNotEmpty() || store.setup.value.home.tailscale || store.setup.value.home.netbirdReady || vpn.value.phase != VpnState.Phase.Off)
     val signedIn = _signedIn.asStateFlow()
     private val _countries = MutableStateFlow<Map<String, List<app.unbraid.data.Country>>>(emptyMap())
     /** Server catalog per provider id. */
@@ -485,7 +486,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** Nothing left to route through: back to the first-run screen, but never by stopping a running VPN (its apps stay blocked). */
     private fun resetIfEmpty() {
-        if (vpn.value.phase == VpnState.Phase.Off && store.accounts.value.isEmpty() && store.setup.value.routes.none { it.imported } && store.setup.value.servers.isEmpty() && !store.setup.value.home.tailscale) signOut()
+        if (vpn.value.phase == VpnState.Phase.Off && store.accounts.value.isEmpty() && store.setup.value.routes.none { it.imported } && store.setup.value.servers.isEmpty() && !store.setup.value.home.tailscale && !store.setup.value.home.netbirdReady) signOut()
     }
 
     /** A new control server or auth key means a new node: drop the old Tailscale state and reconnect fresh. */
@@ -531,6 +532,43 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             checkTailscale()
             resetIfEmpty()
         }.invokeOnCompletion { store.unreserve(gone) } // also when cancelled before it started
+        return null
+    }
+
+    /**
+     * Signs in to NetBird with [url] and [key] and turns it on; the running engine picks it up on its own. Another
+     * management server means another device, with a new key of its own; a new setup key on the same server keeps it.
+     */
+    fun setNetbird(url: String, key: String) {
+        val h = setup.value.home
+        if (url == h.nbManagementUrl && key == h.nbSetupKey && h.nbPrivateKey != null) { clearClipboardIf(key); return } // nothing changed
+        val same = url == h.nbManagementUrl && h.nbPrivateKey != null
+        val device = h.nbPrivateKey?.takeIf { same } ?: WgKeys.generate().private
+        // A first sign-in turns NetBird on; a new key for the one set up keeps the user's choice.
+        if (!setHome { it.copy(netbird = if (it.netbirdReady) it.netbird else true, nbManagementUrl = url, nbSetupKey = key, nbPrivateKey = device) }) return
+        if (!same) store.dropNbMap() // the old account's map is of no use (and is bound to it anyway)
+        clearClipboardIf(key)
+    }
+
+    private val Setup.nbRoutes get() = routes.filter { it.nbExit != null }.map { it.id }.toSet()
+
+    /** Why NetBird can't be signed out of now (an exit route of it is a default), or null. */
+    fun signOutNetbirdRefused() = setup.value.let { s -> s.refusesRemoving(s.nbRoutes, "NetBird") }
+
+    /**
+     * Turns NetBird off, drops its exit routes (their apps follow the default) and forgets this device's NetBird key.
+     * The management server still lists the device until it is removed there. Refused while an exit route is a default.
+     */
+    fun signOutNetbird(): app.unbraid.data.CarriesDefault? {
+        val gone = { s: Setup -> s.nbRoutes }
+        store.reserve(gone, "NetBird")?.let { return it }
+        val saved = try {
+            store.update { s -> s.without(s.nbRoutes).copy(home = s.home.copy(netbird = false, nbManagementUrl = null, nbSetupKey = null, nbPrivateKey = null)) }
+        } finally { store.unreserve(gone) }
+        if (!saved) { notice.value = "Couldn't save the change to sign out of NetBird. Try again."; return null }
+        store.dropNbMap()
+        warn("NetBird is off. Remove this phone from your NetBird dashboard if you don't use it there any more.")
+        resetIfEmpty()
         return null
     }
 
@@ -674,7 +712,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun setLocation(id: String, loc: Location, blocking: Boolean? = null) = guarded { s ->
         // A route's blocking choice belongs to its provider: another provider starts from its own page.
-        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
+        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, nbExit = null, nbName = null, own = null, keyless = false, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
             .let { n -> if (blocking == null) n else n.blocking(id, blocking) }
     }
 
@@ -811,7 +849,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun addImported(target: String, source: (Route) -> Route): String {
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
         store.edit { s ->
-            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
+            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, nbExit = null, nbName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
             s.imported(id, source(blank), alone = store.accounts.value.isEmpty() && draft == null)
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
@@ -838,6 +876,54 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         return old != null
     }
 
+    /**
+     * NetBird uses one exit node at a time, as Tailscale does: an existing NetBird exit route is pointed at [id] instead
+     * of adding another. [id] is the exit node's network ID (what NetBird is told); [name] is only for display.
+     */
+    fun addNbExit(target: String, id: String, name: String): String? {
+        if (nbLock(id) != null) return null
+        draft?.let { d -> return draftNbExit(d, target, id, name) }
+        // The setup in use only: a saved profile's own NetBird route keeps its exit node until that profile is used. A
+        // NetBird route not in use that is edited itself changes alone.
+        val live = setup.value.activeRoutes.mapTo(HashSet()) { it.id }
+        val edited = setup.value.route(target)?.takeIf { it.nbExit != null && it.id !in live }
+        val scope = edited?.let { setOf(it.id) } ?: live
+        val old = setup.value.routes.firstOrNull { it.nbExit != null && it.id in scope }
+        store.edit { s -> s.copy(routes = s.routes.map { if (it.nbExit != null && it.id in scope) it.copy(nbExit = id, nbName = name) else it }) }
+        val t = setup.value.route(target)
+        return when {
+            t != null && t.nbExit == null -> addImported(target) { it.copy(nbExit = id, nbName = name) }
+            old != null -> { if (target.startsWith("app:")) assign(target.removePrefix("app:"), old.id) else if (target.isEmpty()) keep(old.id); old.id }
+            else -> addImported(target) { it.copy(nbExit = id, nbName = name) }
+        }
+    }
+
+    /** [draftTsExit] for NetBird: a profile not in use gets its own route through [exit]; the live one stays as it is. */
+    private fun draftNbExit(d: String, target: String, exit: String, name: String): String {
+        val s = setup.value
+        val own = s.profiles.firstOrNull { it.name == d }?.own.orEmpty()
+        val via = { id: String -> addImported(id) { it.copy(nbExit = exit, nbName = name) } }
+        val id = s.route(target)?.id?.also { via(it) }
+            ?: s.routes.firstOrNull { it.nbExit == exit }?.id
+            ?: s.routes.firstOrNull { it.nbExit != null && it.id in own }?.id?.let(::ownRoute)?.also { via(it) }
+            ?: addImported(target) { it.copy(nbExit = exit, nbName = name) }
+        val now = setup.value
+        val mine = now.profiles.firstOrNull { it.name == d }?.own.orEmpty()
+        now.routes.filter { it.nbExit != null && it.nbExit != exit && it.id in mine && it.id != id }.forEach { via(ownRoute(it.id)) }
+        when {
+            target.startsWith("app:") -> assign(target.removePrefix("app:"), id)
+            target == "default" -> setDefault(id)
+            target.isEmpty() -> keep(id)
+        }
+        return id
+    }
+
+    /** [tsLock] for NetBird: while a profile not in use is edited, the live route through another NetBird exit node. */
+    fun nbLock(id: String) = if (draft == null) null else setup.value.activeRoutes.firstOrNull { it.nbExit != null && it.nbExit != id }
+
+    /** NetBird's exit nodes as last seen running, for picking one while NetBird isn't running. */
+    fun nbCachedExits() = app.unbraid.vpn.NbStatus.parse(store.nbMap(setup.value.home.nbAccount)).exitNodes
+
     /** Skips providers: Tailscale becomes the only network feature. A new install's unusable placeholder route goes (Direct is the default then); routes set up before stay. */
     fun useTailscaleOnly() {
         store.edit { s ->
@@ -853,7 +939,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val n = Manual.cleanName(name, 40).ifEmpty { return }
         store.edit { s ->
             s.copy(routes = s.routes.map { r ->
-                if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), tsName = r.tsExit?.let { n })
+                if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), tsName = r.tsExit?.let { n }, nbName = r.nbExit?.let { n })
             })
         }
     }

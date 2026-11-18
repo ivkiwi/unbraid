@@ -294,7 +294,7 @@ object Backup {
     private fun linked(s: Setup): Setup {
         var servers = s.servers
         val routes = s.routes.map { r ->
-            if (!r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
+            if (!r.imported || r.meshExit || servers.any { it.id == r.own }) return@map r
             val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss }
                 ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss)
                     .also { servers = servers + it }
@@ -304,7 +304,7 @@ object Backup {
     }
 
     /** Whether [s] holds anything [contents] leaves out without keys: own servers, imported routes or a home peer. */
-    fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && it.tsExit == null }
+    fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && !it.meshExit }
 
     fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
         json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys).stamped, keys)).toByteArray()
@@ -326,8 +326,8 @@ object Backup {
 
     /**
      * [s] with every text from a file that is only shown cleaned ([safe], at most [SHOWN]), so the app, its widgets and
-     * its notification never show what an older version let through: a pinned server's city and country, and Tailscale
-     * nodes' names. Texts that pick or match something stay exactly as the file has them, whatever a provider's list
+     * its notification never show what an older version let through: a pinned server's city and country, Tailscale
+     * and NetBird nodes' names. Texts that pick or match something stay exactly as the file has them, whatever a provider's list
      * holds: a place's country, code and city and a pin's name (a location's identity, its favourite and its provider's
      * lookup), own servers' names (a server saved without keys gets its config back by its name), a pin's host, region,
      * group and the Tailscale address. The two that also go into a provider's or the speed test's request are kept only
@@ -337,7 +337,7 @@ object Backup {
     /** Letters, digits and the dots shown for a country without a code: nothing a request could read as its own. */
     private val CODE = Regex("[\\p{L}\\p{N}·]{0,3}")
     fun shown(s: Setup) = s.copy(routes = s.routes.map(::shown), favorites = s.favorites.map(::shown))
-    fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) })
+    fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) }, nbName = r.nbName?.let { safe(it, SHOWN) })
     fun shown(l: Location) = l.copy(countryCode = l.countryCode?.takeIf(CODE::matches), group = l.group?.takeIf(ID::matches),
         pinned = l.pinned?.run { copy(city = safe(city, SHOWN), country = safe(country, SHOWN)) })
 
@@ -413,14 +413,15 @@ object Backup {
             if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss) else server(sv.name, sv.wg, sv.ovpn, sv.ss)
         }
         s.routes.forEach { r ->
-            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
+            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit, r.nbExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
+            r.nbExit?.let { need(it.isNotBlank() && it == it.trim() && it.length <= 253 && it.none(Char::isISOControl), "a NetBird route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
-            need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
+            need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && !r.meshExit)), "a route and its own server don't match")
             if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
         }
         s.home.wg?.let { server(it.name, it, null, null) }
@@ -445,6 +446,8 @@ object Backup {
         // Built as the engine would get it with no provider signed in: own servers get their tunnels, the rest is blocked.
         // Every ready profile too: one that can't run would only fail once the user switches to it.
         for ((name, v) in listOf<Pair<String?, Setup>>(null to s) + s.profiles.filter { it.ready && it.name != s.profile }.map { it.name to s.viewAs(it.name) }) runCatching {
+            // Without keys NetBird's routes are blocked before the engine sees them: their one exit node is checked here.
+            require(v.activeRoutes.mapNotNull { it.nbExit }.distinct().size <= 1) { "NetBird uses one exit node at a time" }
             val p = app.unbraid.vpn.LinkPicker.pick(v, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
             app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(v, p.links, "app.unbraid", false, "", "", blocked = p.blocked.keys))
         }.onFailure { bad("${name?.let { "profile $it" } ?: "its setup"} can't run (${it.message ?: "unknown reason"})") }

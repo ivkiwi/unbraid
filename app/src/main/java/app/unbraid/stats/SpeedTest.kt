@@ -315,8 +315,10 @@ object SpeedTest {
                     val r = setup.route(e)!!
                     val over = app.unbraid.data.Limits.over(setup.copy(testing = up), setup.copy(testing = up + e), { app.unbraid.data.Limits.others(it, acc[it]) }, limit)
                     val ts = setup.copy(testing = up).tsExit
+                    val nb = setup.copy(testing = up).nbExit
                     when {
                         r.tsExit != null && ts != null && ts != r.tsExit -> leg(e) { it.copy(error = "Tailscale has one exit node at a time, and another route uses it.") }
+                        r.nbExit != null && nb != null && nb != r.nbExit -> leg(e) { it.copy(error = "NetBird uses one exit node at a time, and another route uses it.") }
                         over != null -> leg(e) { it.copy(error = "${app.unbraid.data.Providers.get(over.provider)?.name ?: over.provider} allows ${app.unbraid.data.Limits.units(over.limit, over.unit)}, all in use.") }
                         else -> up = up + e
                     }

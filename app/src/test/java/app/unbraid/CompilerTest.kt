@@ -55,6 +55,7 @@ class CompilerTest {
         r.id to when {
             r.wg != null -> WgLink(sv(r.id), r.wg!!)
             r.tsExit != null -> TsLink(sv(r.id))
+            r.nbExit != null -> app.unbraid.data.NbLink(sv(r.id))
             else -> WgLink(sv(r.id), Nord.peer(sv(r.id), key))
         }
     }
@@ -68,6 +69,58 @@ class CompilerTest {
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.endpointTags() = this["endpoints"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content }
     private fun JsonObject.excluded() = this["inbounds"]!!.jsonArray[0].jsonObject["exclude_package"]!!.jsonArray.map { it.jsonPrimitive.content }
+
+    /**
+     * NetBird: one endpoint, its network and routed private networks before the tailnet's (it is a part of 100.64.0.0/10),
+     * peer names answered by exact name only, and an exit-node route riding the endpoint.
+     */
+    @Test fun netbird() {
+        val nbHome = example.home.copy(netbird = true, nbManagementUrl = "https://nb.example.org", nbSetupKey = "SETUP-KEY", nbPrivateKey = key)
+        val s = example.copy(home = nbHome, routes = example.routes + Route("nbx", nbExit = "exit-home", nbName = "box", hue = 3), apps = example.apps + ("com.n" to "nbx"))
+        fun run(s: Setup, networks: List<String> = listOf("100.101.0.0/16", "192.168.77.0/24", "8.8.8.0/24"), names: List<String> = listOf("box.netbird.selfhosted.", "Phone.NetBird.selfhosted")) =
+            Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links(s), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", nbNetworks = networks, nbNames = names))).jsonObject
+        val c = run(s)
+        val ep = c["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it.str("type") == "netbird" }
+        assertEquals(Compiler.NB_TAG, ep.str("tag")); assertEquals("https://nb.example.org", ep.str("management_url")); assertEquals("SETUP-KEY", ep.str("setup_key"))
+        // The device key comes from the app's sealed setup; NetBird gets no file to keep it in.
+        assertEquals(key, ep.str("private_key")); assertNull(ep["config_path"]); assertEquals("exit-home", ep.str("exit_node"))
+        // Private networks only, before the tailnet's rule; a public routed network never captures internet traffic.
+        val rules = c.rules()
+        val nbRule = rules.indexOfFirst { it["outbound"]?.jsonPrimitive?.content == Compiler.NB_TAG && "ip_cidr" in it }
+        val tsRule = rules.indexOfFirst { it["outbound"]?.jsonPrimitive?.content == Compiler.TS_TAG && "ip_cidr" in it }
+        assertTrue(nbRule in 0 until tsRule)
+        assertEquals(listOf("100.101.0.0/16", "192.168.77.0/24"), rules[nbRule]["ip_cidr"]!!.jsonArray.map { it.jsonPrimitive.content })
+        // The exit route's app goes to the endpoint; its tunnel gets no inbound connections.
+        assertTrue(rules.any { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.n") && it["outbound"]?.jsonPrimitive?.content == Compiler.NB_TAG })
+        assertTrue(rules.first()["inbound"]!!.jsonArray.any { it.jsonPrimitive.content == Compiler.NB_TAG })
+        // Peer names by exact name, lowercased and without the root dot; never a whole suffix.
+        val dnsRule = c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }.single { it.str("server") == "dns-netbird" }
+        assertEquals(listOf("box.netbird.selfhosted", "phone.netbird.selfhosted"), dnsRule["domain"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertNull(dnsRule["domain_suffix"])
+        assertEquals(Compiler.NB_TAG, c.dnsServers()["dns-netbird"]!!.str("endpoint"))
+        // A DNS filter on a NetBird peer is asked through NetBird, ahead of the tailnet sharing 100.64.0.0/10; one named
+        // by a peer's name is looked up with NetBird's DNS.
+        fun filter(v: String) = run(s.copy(prefs = Prefs(filter = Filter(Filters.OWN, v, routes = true, directApps = true)))).dnsServers()
+        filter("100.101.0.53").let { d -> for (t in listOf("dns-r-nl", "dns-filter")) assertEquals(t, Compiler.NB_TAG, d[t]!!.str("detour")) }
+        filter("tls://box.netbird.selfhosted").let { d -> assertEquals(Compiler.NB_TAG, d["dns-r-nl"]!!.str("detour")); assertEquals("dns-netbird", d["dns-r-nl"]!!.str("domain_resolver")) }
+        // Home toggle off: the endpoint still runs for the exit route, but no app reaches the peers or their names.
+        val exitOnly = run(s.copy(home = nbHome.copy(netbird = false)))
+        assertTrue(Compiler.NB_TAG in exitOnly.endpointTags())
+        assertTrue(exitOnly.rules().none { it["outbound"]?.jsonPrimitive?.content == Compiler.NB_TAG && "ip_cidr" in it })
+        assertFalse("dns-netbird" in exitOnly.dnsServers())
+        // Not signed in: no endpoint at all; plain HTTP management is refused.
+        assertFalse(Compiler.NB_TAG in run(example.copy(home = example.home.copy(netbird = true))).endpointTags())
+        assertFalse(Compiler.NB_TAG in run(example.copy(home = nbHome.copy(nbPrivateKey = null))).endpointTags())
+        // Registered: its setup key is gone and the device key alone signs in.
+        val registered = run(s.copy(home = nbHome.copy(nbSetupKey = null)))["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it.str("type") == "netbird" }
+        assertNull(registered["setup_key"]); assertEquals(key, registered.str("private_key"))
+        // A damaged key is refused here, before the engine could quote it in an error.
+        assertThrows(IllegalArgumentException::class.java) { run(s.copy(home = nbHome.copy(nbPrivateKey = "not-a-key"))) }
+        assertThrows(IllegalArgumentException::class.java) { run(s.copy(home = nbHome.copy(nbManagementUrl = "http://nb.example.org"))) }
+        // One exit node at a time.
+        val two = s.copy(routes = s.routes + Route("nby", nbExit = "exit-other", hue = 4), apps = s.apps + ("com.m" to "nby"))
+        assertThrows(IllegalArgumentException::class.java) { run(two) }
+    }
 
     /** Each new domain table hands out fake IPs from its block of the pool and refuses the others, before any exit is chosen. */
     @Test fun aFakeIpFromAnotherBlockIsRefused() = Compiler.FAKE_RANGES.indices.forEach { h ->
