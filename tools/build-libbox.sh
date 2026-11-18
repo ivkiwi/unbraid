@@ -41,12 +41,20 @@ for h in gomobile gobind; do
 done
 # Every other version follows from the pinned go.mod files; this lets the bind record their checksums.
 export GOFLAGS=-mod=mod
+TAGS=with_gvisor,with_wireguard,with_utls,with_tailscale,ts_omit_logtail,ts_omit_cachenetmap,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_openvpn,badlinkname,tfogo_checklinkname0
+# NetBird's daemon.proto and sing-box's started_service.proto are both proto package "daemon" and both define
+# daemon.LogLevel. Go's protobuf panics on such a clash while the library loads (the app would crash at start), unless
+# told to only warn. Each side's generated code uses its own descriptors, so nothing reads the other's by that name.
+PROTO="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
+# The engine's packages initialised once on this host, as the phone does when it loads the library: a panic there, or
+# any name clash beyond that known one, stops the build here instead of on a phone.
+out=$(go test -count=1 -v -run '^$' -tags "$TAGS" -ldflags "$PROTO -checklinkname=0" ./experimental/libbox 2>&1) || { echo "$out"; echo "engine init failed"; exit 1; }
+if grep "conflict over" <<<"$out" | grep -v 'file "daemon/started_service.proto" has a name conflict over daemon\.'; then echo "a new protobuf name clash"; exit 1; fi
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
 "$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
-  -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid=" \
-  -tags with_gvisor,with_wireguard,with_utls,with_tailscale,ts_omit_logtail,ts_omit_cachenetmap,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_openvpn,badlinkname,tfogo_checklinkname0 \
-  ./experimental/libbox
+  -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 $PROTO -checklinkname=0 -s -w -buildid=" \
+  -tags "$TAGS" ./experimental/libbox
 # The NDK's start-up object (crtbegin_so.o) carries the label of the compiler that built that NDK, and the macOS and
 # Linux NDKs differ in it, so the same source gave a different libbox.so on each. Drop that label (.comment, unused at
 # run time) and store the entries uncompressed, so the AAR is the same on every host.
