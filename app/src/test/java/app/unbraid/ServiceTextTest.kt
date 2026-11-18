@@ -57,4 +57,33 @@ class ServiceTextTest {
         assertTrue(startingLockdown(built(true), android = false))
         assertTrue(startingLockdown(null, android = true))
     }
+
+    /**
+     * Unreadable settings keep apps offline even when the engine can't get ready (its fake-IP block not saved on a full
+     * disk, no room for its crash log): the service can't run here, so this checks that the hold puts Android's own
+     * blocking interface up before anything that can fail, which needs neither the engine nor a file, with its own DNS
+     * server so no lookup goes to the network's resolver; that no failure after it reaches the connect's teardown; and
+     * that a start out of the hold that fails goes back to it with that interface kept, instead of tearing it down, also
+     * when Android refuses a new one then.
+     */
+    @Test fun theHoldNeedsNoEngineNorFile() {
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        val hold = vpn.substringAfter("private fun hold(").substringBefore("\n    }\n")
+        // Refused while one is up (back from a failed start), the hold keeps that one and goes on; with none it fails.
+        assertTrue(hold.indexOf("runCatching { blockingTun() }.onFailure { if (tun == null) throw it;") in 0 until hold.indexOf("runCatching {\n"))
+        val ready = hold.substringAfter("runCatching {\n").substringBefore("}.onFailure {")
+        listOf("engineSetup(this)", "CommandServer(", "fakeBlock()", "store.fakeBlock = block", "Libbox.checkConfig(json)", "startOrReloadService(").forEach { assertTrue(it, ready.contains(it)) }
+        val tun = vpn.substringAfter("private fun blockingTun() {").substringBefore("\n    }\n")
+        assertTrue(tun.contains("addRoute(\"0.0.0.0\", 0)"))
+        assertTrue(tun.indexOf("addDnsServer(\"172.19.0.2\")") in 0 until tun.indexOf("establish()"))
+        listOf("store.", "cache.db", "Libbox", "fakeBlock").forEach { assertFalse(it, tun.contains(it)) }
+        // The service's first step can't fail before a command is read.
+        assertTrue(vpn.substringAfter("override fun onCreate() {").substringBefore("for ((intent, locked) in inbox)").contains("runCatching { engineSetup(this@UnbraidVpn) }"))
+        // Out of the hold: a failed start keeps the interface and holds again.
+        assertTrue(hold.contains("connect(held = true)"))
+        val connect = vpn.substringAfter("private fun connect(").substringBefore("\n    }\n")
+        val failed = connect.substringAfter("} catch (e: Exception) {")
+        assertTrue(failed.indexOf("if (held && runCatching { stopEngine(keepTun = true); hold(") in 0 until failed.indexOf("teardown("))
+        assertTrue(vpn.contains("if (!keepTun) { runCatching { tun?.close() }; tun = null }"))
+    }
 }
