@@ -2,6 +2,7 @@ package app.unbraid.stats
 
 import android.os.SystemClock
 import app.unbraid.Unbraid
+import app.unbraid.data.Setup
 import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.TsNode
 import app.unbraid.vpn.UnbraidVpn
@@ -30,6 +31,7 @@ object SpeedTest {
     private const val DAY_LIMIT = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."
     private const val NO_SERVER = "No test server can be reached through this exit."
     private const val NO_SERVER_LEG = "M-Lab's test server can't be reached through it. Not in the totals."
+    private const val NOT_BACK = "Tailscale isn't back on its exit node from the last test yet. Try again in a moment."
 
     /** The allowance ran out when the first data arrived (never while one test runs alone; a safeguard). */
     private class DayLimit : Exception()
@@ -75,11 +77,34 @@ object SpeedTest {
 
     private fun client() = Libbox.newStandaloneCommandClient()
 
+    /** How long one exit-node switch may take: it runs under the service's lock, which Stop, Pause and reloads wait for. */
+    private const val SWITCH_MS = 5_000L
+    /** The engine a test last switched Tailscale's exit node on (null: none in this process). On [tsq], under the service's lock. */
+    private var switchedOn: Int? = null
+
+    /**
+     * Sets Tailscale's exit node to [id] ("" for none): true if it did, false if refused, null if it took longer than
+     * [SWITCH_MS]. A late call is cancelled in the engine (its client's context ends the call there too), so it doesn't
+     * land after the caller let go of the service's lock; whether it took effect is then unknown.
+     */
+    private fun switchTo(id: String): Boolean? {
+        val c = client()
+        val call = java.util.concurrent.FutureTask<Unit> { c.setTailscaleExitNode(Compiler.TS_TAG, id) }
+        Thread(call, "ts-exit-node").start()
+        return try { call.get(SWITCH_MS, java.util.concurrent.TimeUnit.MILLISECONDS); true }
+        catch (e: java.util.concurrent.TimeoutException) {
+            runCatching { c.disconnect() }
+            // shortcut: a cancelled gRPC call returns at once; one that still doesn't is let go after 2 s rather than hold Stop.
+            runCatching { call.get(2, java.util.concurrent.TimeUnit.SECONDS) }
+            null
+        } catch (e: Exception) { false }
+    }
+
     /** Tailscale exit nodes the test can switch to: online, and not already carrying a route (those test as the route). */
     fun nodes(): List<TsNode> {
         val s = UnbraidVpn.state.value
         if (Compiler.TS_TAG !in UnbraidVpn.tags.values && !Unbraid.store.setup.value.tailscale) return emptyList()
-        val routed = Unbraid.store.setup.value.tsExit
+        val routed = routedNow(UnbraidVpn.running, Unbraid.store.setup.value)
         return s.tsExitNodes.filter { it.online && it.id.isNotEmpty() && it.ip != routed }
     }
 
@@ -161,15 +186,30 @@ object SpeedTest {
             }
         }
         // A test through Tailscale's routed node first switches back from a tested node, so it never measures that one.
-        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null) switchBack(); Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
+        // Not surely back (a late or refused switch, or a newer engine still setting its node): it would measure the tested one.
+        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute {
+            if (stop()) return@execute
+            if (Unbraid.store.tsTestFrom != null && !switchBack()) { set { it.copy(phase = Phase.Failed, error = NOT_BACK) }; return@execute }
+            Thread(test, "speedtest").start()
+        } else Thread(test, "speedtest").start() }
         else tsq.execute {
             if (stop()) return@execute // cancelled before its turn: switch nothing
-            if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
+            // Only on the engine the test began on, checked and switched under the service's lock so none starts in between.
+            var unsaved = false
+            val ok = UnbraidVpn.withRunning<Boolean?> { running ->
+                if (moved()) return@withRunning null
+                if (stop()) return@withRunning false // cancelled while it waited for the lock: switch nothing
+                // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
+                if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = routedNow(running, Unbraid.store.setup.value)?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
+                // Without the note nothing would switch back (a killed app, a cancel): no switch then.
+                if (Unbraid.store.tsTestFrom == null) { unsaved = true; return@withRunning false }
+                switchedOn = engine // before the call: a late one may still have switched this engine
+                switchTo(node.id) == true
+            }
+            if (ok == null) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
+            if (unsaved) { set { it.copy(phase = Phase.Failed, error = "The app couldn't save its storage, so it didn't switch Tailscale to ${node.name}. Try again.") }; return@execute }
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
-            // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
-            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
-            val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
-            // A restart during the switch may have switched its new engine: switched back at once, never counted there.
+            // A restart right after the switch: the test is dropped, never counted there; the switch back sees to the new engine.
             if (ok && moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; restoreNode(); return@execute }
             // Its traffic counts to the node from here, on the engine switched ([nodeExit]).
             if (ok) { set { it.copy(engine = engine) }; Thread.sleep(1500) }
@@ -330,7 +370,9 @@ object SpeedTest {
                     up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
                 }
                 // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
-                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG }) runCatching { tsq.submit(::switchBack).get() }
+                // Not surely back: only Tailscale's leg stays out, the rest measure as usual.
+                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && !runCatching { tsq.submit<Boolean> { switchBack() }.get() }.getOrDefault(false))
+                    legs.filter { UnbraidVpn.tags[it] == Compiler.TS_TAG }.forEach { e -> leg(e) { it.copy(error = "Tailscale isn't back on its exit node from the last test yet. Not in the totals.") } }
                 parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
                     val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
                     try {
@@ -412,13 +454,43 @@ object SpeedTest {
         switchBack()
     }
 
-    /** On [tsq] only. */
-    private fun switchBack() {
-        val want = restoreTo(Unbraid.store.setup.value.tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+    /**
+     * On [tsq] only. Read and switched under the service's lock, so no engine starts in between. True once Tailscale is
+     * surely back on the routed node (or none); false leaves the note for the next Tailscale status to try again.
+     */
+    private fun switchBack() = UnbraidVpn.withRunning<Boolean> { running ->
+        if (Unbraid.store.tsTestFrom == null) return@withRunning true // no switch left to undo: a configured node stays as it is
+        if (running == null) return@withRunning false // no engine to switch: the next one's status tries again
+        val s = UnbraidVpn.state.value
+        val routed = routedNow(running, Unbraid.store.setup.value)
+        val want = restoreTo(routed, Unbraid.store.tsTestFrom, s.tsExitNodes)
+        when (ownNode(switchedOn, s.engine, s.tsEngine, routed, want, s.tsExitNodes)) {
+            true -> { Unbraid.store.tsTestFrom = null; switchedOn = null; return@withRunning true }
+            false -> return@withRunning false
+            null -> {}
+        }
+        val done = switchTo(want.orEmpty())
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
-        val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
-        if (set(want.orEmpty()) && want != null) Unbraid.store.tsTestFrom = null else if (want != "") set("")
+        if (done == true && want != null) { Unbraid.store.tsTestFrom = null; switchedOn = null; true }
+        else { if (done == false && want != "") switchTo(""); false }
     }
+
+    /**
+     * An engine started since the test switched Tailscale (on engine [switchedOn], null for another process) with a node
+     * of its own ([routed]) sets that node itself, in its own time and only once Tailscale knows it. True when a status
+     * of that engine ([tsEngine]) shows the node ([want]) in use: back. False before it reported anything: wait. Null for
+     * the usual switch back: its status shows another node (the tested one Tailscale saved) or none, or no newer engine
+     * has a node of its own (with none it doesn't touch the exit node, and the tested one is still to be cleared).
+     */
+    internal fun ownNode(switchedOn: Int?, engine: Int, tsEngine: Int, routed: String?, want: String?, nodes: List<TsNode>): Boolean? = when {
+        switchedOn == engine || routed == null -> null
+        tsEngine != engine -> false
+        want != null && nodes.any { it.inUse && it.id == want } -> true
+        else -> null
+    }
+
+    /** The routed node's setting the engine runs ([running]), not a saved edit it refused ([saved] only while none runs). */
+    internal fun routedNow(running: Setup?, saved: Setup): String? = (running ?: saved).tsExit
 
     /**
      * The stable ID to switch back to, for the route's setting now ([routed], an address, ID or name): "" for no exit
