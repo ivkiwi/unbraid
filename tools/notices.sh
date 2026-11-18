@@ -4,7 +4,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SB=${WORK:-$HOME/.cache/unbraid-libbox}/sing-box
-TAGS=$(sed -n 's/.*-tags \([^ ]*\).*/\1/p' "$ROOT/tools/build-libbox.sh")
+TAGS=$(sed -n 's/^TAGS=//p' "$ROOT/tools/build-libbox.sh")
+# One plain list, else go list would quietly read too few modules (and licences) for the engine.
+[[ $TAGS =~ ^[a-z0-9_,]+$ ]] || { echo "no build tags found in build-libbox.sh"; exit 1; }
 export GOTOOLCHAIN=go1.26.11 GOFLAGS=-mod=mod
 OUT="$ROOT/app/src/main/assets/notices.txt"
 mkdir -p "$(dirname "$OUT")"
