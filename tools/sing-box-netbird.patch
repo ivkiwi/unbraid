@@ -688,10 +688,10 @@ index 0000000..08eeeb2
 +}
 diff --git a/protocol/netbird/status.go b/protocol/netbird/status.go
 new file mode 100644
-index 0000000..6e553b0
+index 0000000..a80b9bd
 --- /dev/null
 +++ b/protocol/netbird/status.go
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,195 @@
 +package netbird
 +
 +import (
@@ -751,6 +751,8 @@ index 0000000..6e553b0
 +	// Name is the routing peer's DNS name (the first one, when several serve it).
 +	Name     string `json:"name"`
 +	Selected bool   `json:"selected"`
++	// Online: a routing peer that serves it is connected.
++	Online bool `json:"online"`
 +}
 +
 +// StatusJSON describes the running NetBird endpoint, or {"state":"off"}.
@@ -811,9 +813,11 @@ index 0000000..6e553b0
 +		s.Routes = append(s.Routes, p.String())
 +	}
 +	names := map[string]string{}
++	connected := map[string]bool{}
 +	for _, p := range full.Peers {
 +		fqdn := strings.TrimSuffix(p.FQDN, ".")
 +		names[p.PubKey] = fqdn
++		connected[p.PubKey] = p.ConnStatus == embed.PeerStatusConnected
 +		s.Peers = append(s.Peers, Peer{FQDN: fqdn, IP: bareIP(p.IP), Connected: p.ConnStatus == embed.PeerStatusConnected, Relayed: p.Relayed})
 +	}
 +	nodes, err := client.ExitNodes()
@@ -825,6 +829,9 @@ index 0000000..6e553b0
 +		x := ExitNode{ID: n.ID, Selected: n.Selected}
 +		if len(n.Peers) > 0 {
 +			x.Name = names[n.Peers[0]]
++		}
++		for _, k := range n.Peers {
++			x.Online = x.Online || connected[k]
 +		}
 +		s.ExitNodes = append(s.ExitNodes, x)
 +	}

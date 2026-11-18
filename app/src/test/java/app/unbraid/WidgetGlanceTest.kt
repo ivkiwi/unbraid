@@ -144,6 +144,28 @@ class WidgetGlanceTest {
         assertTrue(ts(runsB, saved(a)).let { !it.working && !it.failing }) // edited back to A, not applied yet
     }
 
+    /**
+     * A NetBird exit is never checked here either: it works while NetBird runs it as the installed exit with a peer
+     * connected, is unknown while that peer is idle (lazy connections) or NetBird starts, and fails while NetBird failed.
+     * Only the exit the engine runs for the route counts.
+     */
+    @Test fun aNetbirdExitCountsByWhatNetbirdReports() {
+        fun saved(id: String) = setup.copy(routes = setup.routes + Route("nb", nbExit = id, nbName = "box"), apps = mapOf("a" to "nb"))
+        val runs = mapOf("nl" to srv, "nb" to Server("box", "exit-a", "", "", 0))
+        fun st(state: String, selected: Boolean = true, online: Boolean = true) =
+            app.unbraid.vpn.NbStatus(state, exitNodes = listOf(app.unbraid.vpn.NbStatus.ExitNode("exit-a", "box.netbird.cloud", selected, online)))
+        fun nb(v: VpnState, s: Setup = saved("exit-a")) = glance(v, s, NET).others.single()
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("running"))).let { it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("running", online = false))).let { !it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("running", selected = false))).let { !it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("starting"))).let { !it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = runs)).let { !it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = app.unbraid.vpn.NbStatus("failed", error = "x"))).let { it.failing && !it.working })
+        // Edited to another exit, not applied yet: the running one's status says nothing of it.
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("running")), saved("exit-b")).let { !it.working && !it.failing })
+        assertTrue(nb(VpnState(Phase.On, servers = mapOf("nl" to srv), nb = st("running"))).failing) // no tunnel: NetBird not signed in
+    }
+
     /** A pass is for the route as it was checked: saved since with another server, or with its check off, it is unknown again. */
     @Test fun aPassHoldsOnlyForTheRouteAsChecked() {
         val v = VpnState(Phase.On, servers = servers, passed = all)

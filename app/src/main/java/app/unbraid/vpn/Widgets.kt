@@ -94,7 +94,7 @@ fun usesLabel(apps: Int, sites: Int, short: Boolean = false) = listOfNotNull(
 /**
  * [vpn] and [setup] as the widgets show them, on network [net] ([AutoSwitch.Net.id]); [held]: the settings won't open.
  * A route works only on evidence: a check answered on this network and engine ([VpnState.passed]), or for a Tailscale
- * exit, Tailscale saying it runs.
+ * or NetBird exit, its client saying it runs.
  */
 fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false): Glance {
     // What the store holds then are defaults, not the user's setup: none of it shows.
@@ -108,13 +108,23 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     // edit not applied yet, or refused), or Tailscale uses another device (a speed test, or not switched yet).
     fun exit(r: app.unbraid.data.Route) = vpn.servers[r.id]?.host?.takeIf { it == r.tsExit }
         ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.takeIf { vpn.tsState == "Running" }?.let { if (!it.online) false else if (it.inUse) true else null }
+    // A NetBird exit as NetBird reports it, for the exit the engine runs for this route: true when it is the one installed
+    // and a peer serving it is connected; null otherwise. Not connected isn't offline: with lazy connections an exit's
+    // peer stays idle until traffic needs it.
+    fun nbExit(r: app.unbraid.data.Route) = vpn.servers[r.id]?.host?.takeIf { it == r.nbExit }
+        ?.let { id -> vpn.nb?.takeIf { it.running }?.exitNodes?.firstOrNull { it.id == id } }?.takeIf { it.selected && it.online }?.let { true }
     // Answered as saved now: a route saved since with another server or with its check off is not known to work.
-    fun working(r: app.unbraid.data.Route) = on && if (r.tsExit != null) net != null && exit(r) == true else passed?.let { Health.answered(it, r) } == true
+    fun working(r: app.unbraid.data.Route) = on && when {
+        r.tsExit != null -> net != null && exit(r) == true
+        r.nbExit != null -> net != null && nbExit(r) == true
+        else -> passed?.let { Health.answered(it, r) } == true
+    }
     // No tunnel (its provider gave no server, or its own server has no keys).
     fun missing(id: String) = on && id !in vpn.servers
-    // No tunnel, a failed check, or a Tailscale exit without Tailscale or whose device is offline.
+    // No tunnel, a failed check, a Tailscale exit without Tailscale or whose device is offline, or a NetBird exit while NetBird failed.
     fun failing(id: String) = on && (missing(id) || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
-        setup.route(id)?.takeIf { it.tsExit != null }?.let { tsDown || exit(it) == false } == true)
+        setup.route(id)?.takeIf { it.tsExit != null }?.let { tsDown || exit(it) == false } == true ||
+        setup.route(id)?.nbExit != null && vpn.nb?.state == "failed")
     // Only websites whose rule applies count, as in the engine.
     val applied = app.unbraid.data.Sites.applied(setup, reported = vpn.tsSuffix)
     fun row(id: String): WidgetRoute? {

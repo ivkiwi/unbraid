@@ -25,8 +25,9 @@ data class NbStatus(
     data class Peer(val fqdn: String = "", val ip: String = "", val connected: Boolean = false, val relayed: Boolean = false)
 
     /** An exit node by its network ID ([app.unbraid.data.Route.nbExit]) and its routing peer's name. */
+    /** [online]: a routing peer that serves it is connected now (an idle one, with lazy connections, is not). */
     @Serializable
-    data class ExitNode(val id: String, val name: String = "", val selected: Boolean = false) {
+    data class ExitNode(val id: String, val name: String = "", val selected: Boolean = false, val online: Boolean = false) {
         val label get() = name.substringBefore('.').ifEmpty { id }
     }
 

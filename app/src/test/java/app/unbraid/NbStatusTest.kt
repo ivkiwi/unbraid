@@ -10,11 +10,12 @@ class NbStatusTest {
     @Test fun readsTheEngineStatus() {
         val s = NbStatus.parse("""{"state":"running","ip":"100.101.0.9","fqdn":"phone.netbird.cloud","network":"100.101.0.0/16","management":true,
             "routes":["192.168.1.0/24"],"peers":[{"fqdn":"nas.netbird.cloud","ip":"100.101.0.7","connected":true,"relayed":false},{"fqdn":"","ip":"100.101.0.8"}],
-            "exit_nodes":[{"id":"exit-home","name":"box.netbird.cloud","selected":true},{"id":"exit-2"}],"extra":1}""")
+            "exit_nodes":[{"id":"exit-home","name":"box.netbird.cloud","selected":true,"online":true},{"id":"exit-2"}],"extra":1}""")
         assertTrue(s.running)
         assertEquals(listOf("100.101.0.0/16", "192.168.1.0/24"), s.networks)
         assertEquals(listOf("nas.netbird.cloud", "phone.netbird.cloud"), s.names)
         assertEquals(listOf("box", "exit-2"), s.exitNodes.map { it.label })
+        assertEquals(listOf(true, false), s.exitNodes.map { it.online }) // an engine before this field: not known online
     }
 
     @Test fun onlyNamesUnderItsOwnDomain() {
