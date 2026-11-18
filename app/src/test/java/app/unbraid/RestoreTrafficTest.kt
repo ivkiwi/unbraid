@@ -325,6 +325,8 @@ class RestoreTrafficTest {
         val nb = Route("n", nbExit = "exit-home", nbName = "nas")
         assertTrue(moved(nb, nb.copy(nbExit = "exit-office", nbName = "office")).contains("\"office\" exits through another NetBird device: office instead of nas."))
         assertTrue(moved(nb, nb).none { "exits through" in it })
+        // The same name on another device: said by its network ID.
+        assertTrue(moved(nb, nb.copy(nbExit = "exit-office")).contains("\"nas\" exits through another NetBird device: exit-office instead of exit-home."))
     }
 
     @Test fun aSetupThatCanNotBeCompiledIsSaidSo() {
