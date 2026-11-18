@@ -297,8 +297,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         current = this
         scope.launch {
             // Off the main thread: loading the engine takes long enough to freeze the connect animation. Every command
-            // that needs it runs below, after it.
-            engineSetup(this@UnbraidVpn)
+            // that needs it runs below, after it. One that fails (no room for its crash log) is tried again by the start
+            // that needs the engine; keeping apps offline over unreadable settings needs none.
+            runCatching { engineSetup(this@UnbraidVpn) }.onFailure { Log.e(TAG, "engine setup: ${logLine(it)}") }
             cleanup?.join()
             for ((intent, locked) in inbox) {
                 lock.withLock { waiting.decrementAndGet(); handle(intent, locked) }
@@ -401,11 +402,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     @Volatile private var tunInput: Compiler.Input? = null
 
     @OptIn(FlowPreview::class)
-    private fun connect(updated: Boolean = false) {
+    private fun connect(updated: Boolean = false, held: Boolean = false) {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
             if (state.value.phase == VpnState.Phase.On) { // a failed reload may have ended it
-                if (holding) notice(UNREADABLE) else notify(store.setup.value)
+                if (holding) notice(holdText) else notify(store.setup.value)
                 AfterUpdate.on(this) // still on: a start after an update may have cleared the note meanwhile
             }
             return
@@ -423,6 +424,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
             if (setup.tailscale && store.tsStored) store.tsState
+            runCatching { engineSetup(this) }.onFailure { throw Fail("The connection engine couldn't start.") }
             val accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
@@ -457,6 +459,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             }.launchIn(scope)
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
+            // Out of a hold the blocking interface stays until a working one replaces it: apps stay offline, and it tries again.
+            if (held && runCatching { stopEngine(keepTun = true); hold(Redact.message(e, "Could not connect")) }.isSuccess) return
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
             if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
@@ -464,34 +468,47 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** The engine runs [Compiler.blockAll] because the saved settings won't open ([hold]); nothing else is applied then. */
     private var holding = false
+    /** What the notice says while [holding]: the settings won't open, or the start after they opened failed. */
+    private var holdText = UNREADABLE
 
     /** [restores] as it was when the setup the engine runs was read. */
     private var ranRestores = 0L
 
     /**
      * Runs the engine with every app's connections refused, until the saved settings open (the app's Try again) or the
-     * user starts fresh; then connects with them. Disconnect and Pause work as always. Caller holds [lock].
+     * user starts fresh; then connects with them. Disconnect and Pause work as always. After that start failed ([why]),
+     * it is tried again a minute later. Caller holds [lock].
      */
-    private fun hold() {
+    private fun hold(why: String? = null) {
         forgetLookups(this)
-        val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
+        // Android's interface alone keeps apps offline, with no engine or file behind it: getting the engine ready may
+        // fail (a full disk), the hold may not. The engine's own interface replaces it, and the real setup's that one.
+        // Back from a failed start one is up already, which nothing reads: if Android refuses a new one, that one stays.
+        runCatching { blockingTun() }.onFailure { if (tun == null) throw it; Log.e(TAG, "hold: ${logLine(it)}") }
         generation++
-        val block = fakeBlock()
-        val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block)
-        engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
-        if (block != lastBlock) { engine("$APP couldn't save its state. Try again.") { store.fakeBlock = block }; blockSince = SystemClock.elapsedRealtime() }
-        lastBlock = block
-        openTable(true)
-        tunInput = null
-        engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
-        starts++
+        runCatching {
+            engineSetup(this)
+            val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
+            val block = fakeBlock()
+            val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block)
+            engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
+            if (block != lastBlock) { engine("$APP couldn't save its state. Try again.") { store.fakeBlock = block }; blockSince = SystemClock.elapsedRealtime() }
+            lastBlock = block
+            openTable(true)
+            tunInput = null
+            engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
+            starts++
+        }.onFailure { Log.e(TAG, "hold: ${logLine(it)}") }
         holding = true
-        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
+        holdText = if (why == null) UNREADABLE else "$APP couldn't connect, so apps are offline. It tries again in a minute; disconnect to go online."
+        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = why, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
         AfterUpdate.on(this)
-        notice(UNREADABLE)
+        notice(holdText)
         val mine = session
         watch = scope.launch {
+            // shortcut: a fixed minute between tries, no backoff; enough while a failed start is rare (a full disk).
+            if (why != null) kotlinx.coroutines.delay(60_000)
             store.unreadable.first { !it }
             lock.withLock {
                 if (session != mine || !holding || destroyed) return@withLock
@@ -505,7 +522,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 forgetLookups(this@UnbraidVpn)
                 net.stop()
                 state.value = VpnState(VpnState.Phase.Connecting)
-                connect()
+                connect(held = true)
             }
         }
     }
@@ -1023,8 +1040,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         scope.launch { lock.withLock { if (session == mine && state.value.phase != VpnState.Phase.Off) teardown(why) } }
     }
 
-    /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
-    private fun stopEngine() {
+    /** Stops the engine and the tunnel, but Android's interface with [keepTun] (a hold takes it over); the service itself stays. Caller holds [lock]. */
+    private fun stopEngine(keepTun: Boolean = false) {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         pool?.cancel(); pool = null; exhaustedSaid = false
@@ -1036,7 +1053,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         tsLoginPending = false
         holding = false
         runCatching { server?.closeService() }
-        runCatching { tun?.close() }; tun = null
+        if (!keepTun) { runCatching { tun?.close() }; tun = null }
         openTable(false)
         forgetLookups(this)
         net.stop()
@@ -1206,6 +1223,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         tun?.close()
         tun = pfd
         return pfd.fd
+    }
+
+    /**
+     * An interface nothing reads, for [hold]: every app's packets go nowhere (IPv6 too, which it doesn't allow). The app
+     * itself stays outside, as in every setup ([Compiler.compile]).
+     */
+    private fun blockingTun() {
+        // A DNS server inside it too: with none Android may hand lookups to the network's own resolver.
+        val pfd = Builder().setSession(APP).addAddress("172.19.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("172.19.0.2")
+            .addDisallowedApplication(packageName).establish() ?: error("VPN permission revoked")
+        tun?.close()
+        tun = pfd
     }
 
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
