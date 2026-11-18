@@ -84,6 +84,8 @@ data class VpnState(
     val tsAnnounced: String? = null,
     /** Tailnet peers that offer themselves as exit nodes. */
     val tsExitNodes: List<TsNode> = emptyList(),
+    /** The engine start ([engine]) that was running when Tailscale last reported [tsExitNodes]: a reload keeps an older engine's. */
+    val tsEngine: Int = 0,
     /** While paused: when the connection comes back (epoch ms), 0 = only when resumed by hand. */
     val pausedUntil: Long = 0,
     /** While paused: when the pause began (epoch ms), for the countdown ring. */
@@ -233,6 +235,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         suspend fun <T> whileStopped(f: () -> T): T? = lock.withLock {
             if (state.value.phase == VpnState.Phase.Off && (current?.waiting?.get() ?: 0) == 0) f() else null
         }
+
+        /** Runs [f] with the setup the engine runs ([running]), holding the lifecycle lock so no engine starts meanwhile. Blocks. */
+        fun <T> withRunning(f: (Setup?) -> T): T = kotlinx.coroutines.runBlocking { lock.withLock { f(running) } }
 
         /**
          * Loads the engine (a 60 MB native library and the Go runtime) once, here rather than at app start: the UI,
@@ -992,7 +997,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     }.sortedBy { it.name.lowercase() }
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
-                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsAnnounced = reported) }
+                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsEngine = starts, tsAnnounced = reported) }
                     // The sign-in pages' way around the exit opens with a sign-in link and closes only once signed in: a
                     // restarted engine reports no link at first, which must not close it (each reload restarts Tailscale).
                     // Compared with what the engine runs, so a reload that failed is tried again on the next status.
