@@ -49,7 +49,12 @@ PROTO="-X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
 # The engine's packages initialised once on this host, as the phone does when it loads the library: a panic there, or
 # any name clash beyond that known one, stops the build here instead of on a phone.
 out=$(go test -count=1 -v -run '^$' -tags "$TAGS" -ldflags "$PROTO -checklinkname=0" ./experimental/libbox 2>&1) || { echo "$out"; echo "engine init failed"; exit 1; }
-if grep "conflict over" <<<"$out" | grep -v 'file "daemon/started_service.proto" has a name conflict over daemon\.'; then echo "a new protobuf name clash"; exit 1; fi
+# Every line of every clash warning must be one of the known clash's own lines, word for word.
+KNOWN="WARNING: proto: enum daemon.LogLevel is already registered
+$(printf '\tpreviously from: "github.com/netbirdio/netbird/client/proto"\n\tcurrently from:  "github.com/sagernet/sing-box/daemon"')
+$(for n in LogLevel TRACE DEBUG INFO WARN ERROR FATAL PANIC; do echo "WARNING: proto: file \"daemon/started_service.proto\" has a name conflict over daemon.$n"; done)"
+clash=$(grep -E '^WARNING: proto:|^[[:space:]]+(previously|currently) from:' <<<"$out" | grep -vxF "$KNOWN" || true)
+[ -z "$clash" ] || { echo "$clash"; echo "a new protobuf name clash"; exit 1; }
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
 "$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
