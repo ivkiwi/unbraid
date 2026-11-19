@@ -469,10 +469,13 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     /**
      * A speed test switched Tailscale to another exit node and hasn't switched it back yet: the stable ID of the node in
      * use before ("" for none); null when nothing is to be undone. Older versions wrote "1", which is no node ID.
+     * Never throws: the speed test uses it in executor tasks with no catch, where an exception would end the app. A note
+     * that exists but won't read counts as one with no node known (""), and one deleted during the read counts as none;
+     * a write that fails leaves the note as it was, which the caller reads back.
      */
     var tsTestFrom: String?
-        get() = read("tstest")?.takeIf { it != "1" } ?: if (File(dir, "tstest").exists()) "" else null
-        set(v) { if (v != null) write("tstest", v) else File(dir, "tstest").delete() }
+        get() = runCatching { read("tstest") }.getOrNull()?.takeIf { it != "1" } ?: if (File(dir, "tstest").exists()) "" else null
+        set(v) { if (v != null) runCatching { write("tstest", v) } else File(dir, "tstest").delete() }
 
     fun signOutAll() {
         if (_unreadable.value) return
