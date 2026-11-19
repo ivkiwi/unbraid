@@ -1,8 +1,9 @@
 # unbraid 3.1.1: fix commits for the defects in review-3.1.1.md
 
 This branch (`upstream-fixes` on ivkiwi/unbraid) holds one commit per defect from
-[review-3.1.1.md](review-3.1.1.md), each with its tests, on top of v3.1.1 (`f495132`). This file
-and review-3.1.1.md are notes, not part of any fix.
+[review-3.1.1.md](review-3.1.1.md), each with its tests, on top of v3.1.1 (`f495132`), and one
+follow-up to U-08 for a crash found later. This file and review-3.1.1.md are notes, not part of
+any fix.
 
 ## Taking the commits
 
@@ -11,8 +12,9 @@ and review-3.1.1.md are notes, not part of any fix.
   needs this branch's objects in your repository: from a patch file alone, or with a plain
   `git apply`, U-03, U-04, U-06, U-10 and U-11 fail for lack of context. The whole series applies
   in order.
-- One dependency: U-07's tests use `Backup.MAX_EACH` and the merged-route limit from U-10. If you
-  take U-07 with its tests, take U-10 first.
+- Two dependencies. U-07's tests use `Backup.MAX_EACH` and the merged-route limit from U-10: if
+  you take U-07 with its tests, take U-10 first. The U-08 follow-up needs U-08: without U-08's
+  read-back of the note, a write it lets fail would switch Tailscale with no note left to undo it.
 - U-03 adds an engine patch and changes the committed checksum, not the AAR, which isn't in Git.
   Rebuild `app/libs/libbox.aar` with `tools/build-libbox.sh`. The script rewrites
   `app/libs/libbox.aar.sha256`, so then run `git diff --exit-code HEAD -- app/libs/libbox.aar.sha256`:
@@ -25,9 +27,10 @@ and review-3.1.1.md are notes, not part of any fix.
 ## How far to trust it
 
 - The series went through several rounds of review and revision. It has not been run on a phone.
-- CI on a branch made of this series plus a build workflow built the engine with U-03's patch,
-  compiled the app and passed every unit test (`testFossDebugUnitTest`, restore oracle included).
-  U-03 carries that build's `libbox.aar.sha256`, and the next run built the APK with it.
+- CI on a branch made of this series (through the U-08 follow-up) plus a build workflow built the
+  engine with U-03's patch, compiled the app and passed every unit test (`testFossDebugUnitTest`,
+  restore oracle included). The run reproduced the checksum committed in U-03 and built the APK
+  with it.
 - Several fixes close the defect as described but leave a narrower case open. The commit messages
   say so, and the "Open" column below summarizes them, so that no fix reads as wider than it is.
 
@@ -56,6 +59,7 @@ limitations, from the commit messages and from the later review.
 | U-16 | Pause: a timed pause lasts its time when Android restarts the service | The note is written before the engine stops; if it can't be, or the boot count is unknown, the VPN stays on with "Not paused". If the note can't be deleted the app tries to empty it; if both fail, it shows a notice and retries every 30 s. | The retry lives in the process; if Android ends it first, a restart may pause again (the notice says so). |
 | U-17 | Network: another Wi-Fi on the same interface retries blocked routes at once | As the title says. | |
 | U-18 | Websites: after connect a Headscale tailnet's websites are shown as the tailnet's | As the title says. | |
+| U-08 follow-up | Speed test: a switch-back note that won't read or write no longer ends the app | `Store.tsTestFrom` no longer lets an `IOException` out. The speed test reads and writes it in tasks posted to its executor with no catch and no handler, so an `IOException` reading or writing the note ended the app's process, the VPN service with it; the first read and the write were already there in 3.1.1. A note that exists but won't read now counts as a switch still to undo with no node known, so the switch back uses the routed node (or none) if Tailscale knows it, else asks Tailscale for no exit node and tries again on the next status; a write that fails leaves the note as it was (none, before a node test), so the test doesn't switch. | A note that won't delete is tried again on each Tailscale status, as before. |
 
 ## Left for you to decide
 
@@ -72,12 +76,6 @@ small change:
 2. **U-07, confirm sheet.** If a waiting choice is the only reason the merged setup exceeds 500
    routes, its expiry alone doesn't refresh the sheet, so Keep stays hidden; reopening the sheet or
    changing the current setup reruns the check.
-3. **U-08, reading and writing the note.** `Store.tsTestFrom` can throw an `IOException` on read
-   and on write, not only report a failed rename. In the node test this happens inside
-   `tsq.execute` with no catch, so the "couldn't save" branch is never reached: the test isn't
-   marked failed, and the uncaught exception ends the app's process, the VPN service with it. The
-   first read and the write are as in 3.1.1; this series adds one more read. Catching the exception
-   there and treating it as "not saved" would close it.
-4. **U-02, full fix.** Watching installs and removals against the running setup and rebuilding the
+3. **U-02, full fix.** Watching installs and removals against the running setup and rebuilding the
    tunnel when the user ids it actually leaves out change (see the table).
-5. **U-05, full fix.** Tracking whether the kept interface is the blocking one (see the table).
+4. **U-05, full fix.** Tracking whether the kept interface is the blocking one (see the table).
