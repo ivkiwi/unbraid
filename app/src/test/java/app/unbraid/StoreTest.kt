@@ -32,6 +32,18 @@ class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
 
+    @Test fun aSpeedTestNoteThatWontReadOrWriteNeverThrows() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        // Won't write: the note's temporary file can't be opened, so no note is left and the test doesn't switch.
+        File(dir, "tstest.tmp").mkdir()
+        s.tsTestFrom = "100.64.0.1\nnodeid"
+        assertEquals(null, s.tsTestFrom)
+        // Won't read: a switch is still to be undone, with no node known.
+        File(dir, "tstest").mkdir()
+        assertEquals("", s.tsTestFrom)
+    }
+
     @Test fun unreadableLinkCacheIsEmpty() {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }

@@ -1,6 +1,7 @@
 package app.unbraid.stats
 
 import android.os.SystemClock
+import app.unbraid.APP
 import app.unbraid.Unbraid
 import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.TsNode
@@ -169,6 +170,8 @@ object SpeedTest {
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
             // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
             if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = (UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
+            // After process death, the status handler needs this note to know a switch is pending: no switch without it.
+            if (Unbraid.store.tsTestFrom == null) { set { it.copy(phase = Phase.Failed, error = "$APP couldn't save its state, so Tailscale wasn't switched to ${node.name}. Try again.") }; return@execute }
             val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
             // A restart during the switch may have switched its new engine: switched back at once, never counted there.
             if (ok && moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; restoreNode(); return@execute }
