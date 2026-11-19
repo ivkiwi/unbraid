@@ -49,6 +49,18 @@ class StoreTest {
         s.dropNbMap(); assertNull(s.nbMap(a.nbAccount))
     }
 
+    @Test fun aSpeedTestNoteThatWontReadOrWriteNeverThrows() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        // Won't write: the note's temporary file can't be opened, so no note is left and the test doesn't switch.
+        File(dir, "tstest.tmp").mkdir(); File(dir, "tstest.tmp/x").writeText("")
+        s.tsTestFrom = "100.64.0.1\nnodeid"
+        assertEquals(null, s.tsTestFrom)
+        // Won't read: a switch is still to be undone, with no node known.
+        File(dir, "tstest").mkdir()
+        assertEquals("", s.tsTestFrom)
+    }
+
     @Test fun unreadableLinkCacheIsEmpty() {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }
