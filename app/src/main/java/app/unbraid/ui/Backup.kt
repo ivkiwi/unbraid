@@ -309,7 +309,7 @@ class BackupFlow(private val ui: Ui) {
         val keepAs = PREVIOUS.takeIf { keep && keepable == true }
         var moved = false
         // Numbered within the setup it puts in the store, so whoever reads that setup reads which restore it comes from.
-        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.let { it.copy(restore = s.restore + 1, fromRestore = it) }?.also { target = it } ?: s }
+        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.let { it.copy(restore = s.restore + 1, fromRestore = it.copy(fromRestore = null, home = it.home.keyless())) }?.also { target = it } ?: s }
         val t = target
         if (t == null || Unbraid.store.setup.value != t) {
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")

@@ -1486,11 +1486,13 @@ internal fun startingLockdown(built: Compiler.Input?, android: Boolean) = built?
  * The restore the running setup ([running]) comes from: [ran], noted when it was installed, or the refused setup's own
  * when what runs is what that restore stored ([Setup.fromRestore]): the same backup restored again, followed by an edit
  * quick enough that the watcher saw only the edit. Which apps still wait to be installed, and until when, is set anew by
- * each restore and cleared as apps arrive: only the apps' and profiles' routes are compared.
+ * each restore and cleared as apps arrive (an export clears [Setup.waitingEach] too): only the apps' and profiles' routes
+ * are compared. What the restore stored keeps no NetBird or Tailscale keys ([app.unbraid.data.Home.keyless]), so what
+ * runs is compared as such: a setup key used up after the restore no longer counts, another device key still does.
  */
 internal fun ranRestore(ran: Long, running: Setup?, refused: Setup): Long {
-    fun plain(s: Setup) = s.copy(restore = 0, fromRestore = null, waiting = emptySet(), waitingUntil = 0)
-    return if (running != null && refused.fromRestore?.let(::plain) == plain(running)) refused.restore else ran
+    fun plain(s: Setup) = s.copy(restore = 0, fromRestore = null, waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap())
+    return if (running != null && refused.fromRestore?.let(::plain) == plain(running).let { it.copy(home = it.home.keyless()) }) refused.restore else ran
 }
 
 /** A start ([on]) or a stop or pause, numbered [n] in the order asked. */

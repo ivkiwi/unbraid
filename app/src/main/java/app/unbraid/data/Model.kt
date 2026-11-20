@@ -139,6 +139,11 @@ data class Home(
     /** Which NetBird account (server and device) this is, without the key itself; null when signed out. */
     val nbAccount get() = if (!netbirdReady) null else java.security.MessageDigest.getInstance("SHA-256")
         .digest("$nbManagementUrl\n$nbPrivateKey".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+    /**
+     * Without its NetBird and Tailscale keys, for a copy kept only to compare with ([Setup.fromRestore]): the NetBird
+     * device key by its [nbAccount].
+     */
+    fun keyless() = copy(tsAuthKey = null, nbSetupKey = null, nbPrivateKey = nbAccount)
 }
 
 @Serializable

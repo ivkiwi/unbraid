@@ -29,7 +29,25 @@ class RestoreAckTest {
     }
 
     /** As the restore numbers what it stores ([s], a backup's setup made this phone's) and keeps it with its edits. */
-    private fun restored(s: Setup, from: Setup) = s.copy(restore = from.restore + 1, fromRestore = s.copy(restore = 0, fromRestore = null))
+    private fun restored(s: Setup, from: Setup) = s.copy(restore = from.restore + 1, fromRestore = s.copy(restore = 0, fromRestore = null, home = s.home.keyless()))
+
+    /**
+     * What a restore keeps to compare holds no NetBird or Tailscale keys, and what changes after it on its own (a NetBird setup key used up,
+     * waits a kept setup's export cleared) doesn't make a refused edit stop the VPN. Another device key still does.
+     */
+    @Test fun keysAndWaitsDontSplitARestoreFromWhatRuns() {
+        val home = app.unbraid.data.Home(netbird = true, nbManagementUrl = "https://nb.example.org", nbSetupKey = "SETUP", nbPrivateKey = "A".repeat(43) + "=", tsAuthKey = "tskey")
+        val stored = Setup(defaultRoute = "b", home = home, waitingEach = mapOf("x" to mapOf("r" to 1L)))
+        val b1 = restored(stored, Setup())
+        val keys = listOf("SETUP", "A".repeat(43) + "=", "tskey")
+        assertTrue(keys.none { it in b1.fromRestore.toString() })
+        // The same backup again, unseen by the engine, which runs the first with its setup key used and its waits cleared.
+        val b2 = restored(stored, b1)
+        val e = Engine(Setup()).apply { install(b1.copy(home = home.copy(nbSetupKey = null), waitingEach = emptyMap())) }
+        assertFalse(e.refusedStops(b2.copy(defaultRoute = "broken")))
+        val other = Engine(Setup()).apply { install(b1.copy(home = home.copy(nbPrivateKey = "B".repeat(43) + "="))) }
+        assertTrue(other.refusedStops(b2.copy(defaultRoute = "broken")))
+    }
 
     @Test fun theSameBackupAgainKeepsTheVpn() {
         val a = Setup(defaultRoute = "a")
@@ -118,7 +136,7 @@ class RestoreAckTest {
         assertTrue(vpn.contains("ranRestores = ranRestore(ranRestores, applied, setup)\n        if (restored && ranRestores != setup.restore) teardown(RESTORE_REFUSED)"))
         assertEquals(2, Regex("""val setup = store\.setup\.value\n\s+val seen = setup\.restore""").findAll(vpn).count()) // connect and reload
         val apply = java.io.File("src/main/java/app/unbraid/ui/Backup.kt").readText().substringAfter("fun apply() {")
-        assertTrue(apply.contains("s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.let { it.copy(restore = s.restore + 1, fromRestore = it) }?.also { target = it }"))
+        assertTrue(apply.contains("s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.let { it.copy(restore = s.restore + 1, fromRestore = it.copy(fromRestore = null, home = it.home.keyless())) }?.also { target = it }"))
         assertFalse(apply.contains("UnbraidVpn.restore"))
     }
 }
