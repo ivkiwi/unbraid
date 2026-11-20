@@ -25,9 +25,11 @@ deps '{{.Dir}}' > "$PKGS" # folders of the packages actually linked
   # The Java bindings: gobind's generated code links the gomobile in sing-box's go.mod.
   v=$(awk '$1 == "github.com/sagernet/gomobile" {print $2}' "$SB/go.mod"); d=$(go env GOMODCACHE)/github.com/sagernet/gomobile@$v
   echo; echo "=== github.com/sagernet/gomobile $v (Java bindings)"; cat "$d/$(licence "$d")"
-  deps '{{with .Module}}{{.Path}} {{or .Version "-"}} {{.Dir}}{{end}}' | while read -r p v d; do
+  # A replaced module is named with what replaced it: its licence is read from there.
+  deps '{{with .Module}}{{.Path}} {{or .Version "-"}} {{with .Replace}}{{.Path}}{{with .Version}}@{{.}}{{end}}{{else}}-{{end}} {{.Dir}}{{end}}' | while read -r p v r d; do
       [ "$v" = - ] && v= # the main module (sing-box) has no version
-      echo; echo "=== $p${v:+ $v}"
+      [ "$r" = - ] && r=
+      echo; echo "=== $p${v:+ $v}${r:+, replaced by $r}"
       show "$d/$(licence "$d")"
       # NOTICE/COPYRIGHT files, and the licences in subfolders that hold (or sit above) linked code.
       { find "$d" -maxdepth 1 -type f \( -iname 'NOTICE*' -o -iname 'COPYRIGHT*' \)
