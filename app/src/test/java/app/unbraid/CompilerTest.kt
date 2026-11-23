@@ -740,6 +740,19 @@ class CompilerTest {
         }
     }
 
+    /** A blocked Tailscale route never names the exit node: the running one does, as the one-node check counts them. */
+    @Test fun aBlockedTailscaleRouteNeverNamesTheExitNode() {
+        val s = example.copy(routes = listOf(Route("tsA", tsExit = "100.64.0.1")) + example.routes + Route("ts", tsExit = "100.101.102.103", hue = 4),
+            apps = example.apps + ("com.t" to "tsA") + ("com.n" to "ts"))
+        fun ts(blocked: Set<String>) = compile(s, blocked = blocked)["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it["type"]!!.jsonPrimitive.content == "tailscale" }
+        assertEquals("100.101.102.103", ts(setOf("tsA"))["exit_node"]!!.jsonPrimitive.content)
+        assertEquals("100.101.102.103", Compiler.tsExit(s, setOf("tsA")))
+        // Every Tailscale route blocked: no exit node, and LAN access still as chosen, for a speed test's node switch.
+        val none = ts(setOf("tsA", "ts"))
+        assertNull(none["exit_node"]); assertNull(Compiler.tsExit(s, setOf("tsA", "ts")))
+        assertEquals(s.prefs.lan, none["exit_node_allow_lan_access"]!!.jsonPrimitive.content.toBoolean())
+    }
+
     @Test fun disablingTailnetAccessPreservesTheSeparateHomeWireGuardTunnel() {
         val s = example.copy(
             home = Home(subnets = listOf("10.42.0.0/16"), wg = WgConf.parse(FRITZ, "Home")),
