@@ -137,6 +137,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         @Volatile var tcpOnly: Set<String> = emptySet()
         /** The setup the engine runs (not the one being edited): stats attribute traffic against it. */
         @Volatile var running: Setup? = null
+        /** The Tailscale exit node the engine runs ([Compiler.tsExit]): none while every Tailscale route is blocked. Set before [running]. */
+        @Volatile var tsExit: String? = null
         /** Loopback port and password of the app's own way into each exit ([Compiler.PROBE]); see [Probe]. */
         @Volatile var probe: Pair<Int, String>? = null
         /** The phone's own network (under the VPN) is metered: mobile data, or Wi-Fi marked so. */
@@ -631,7 +633,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
-        tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
+        tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null && it.id !in blocked }.associate { it.id to Compiler.TS_TAG }
+        tsExit = Compiler.tsExit(setup, blocked)
         val was = running
         running = setup
         val eligibleImports = setup.activeRoutes.filter { it.imported && Health.eligible(it) && it.id in links }.map { it.id }.toSet()
@@ -1191,7 +1194,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         installRetry?.cancel(); installRetry = null
         app.unbraid.data.Mullvad.listChanged = null
         applied = null; rejected = null; lastGood = null; builtInstalls = -1; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
-        running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
+        running = null; tsExit = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
     }
 
     /** Caller holds [lock]. */
@@ -1303,7 +1306,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 openTable(false)
                 forgetLookups(this@UnbraidVpn)
                 failing = emptySet()
-                probe = null; links = emptyMap(); running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
+                probe = null; links = emptyMap(); running = null; tsExit = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
                 cancelResume() // again: a pause that was still running when the service went may have set an alarm
                 AfterUpdate.off(this@UnbraidVpn)
                 if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()

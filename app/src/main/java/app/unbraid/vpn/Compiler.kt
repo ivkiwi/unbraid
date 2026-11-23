@@ -361,7 +361,10 @@ object Compiler {
                     s.home.tsAuthKey?.let { put("auth_key", it) }
                     // Over plain HTTP a network attacker could hand Tailscale a fake control-server key.
                     s.home.tsControlUrl?.let { require(it.startsWith("https://")) { "Headscale needs an https:// address. Change it in Settings." }; put("control_url", it) }
-                    s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
+                    // From the routes that passed the checks, as the one-node check above: a blocked one names no node.
+                    tsExit(s, i.blocked)?.let { put("exit_node", it) }
+                    // Also without an exit route: a speed test's node switch uses it too.
+                    put("exit_node_allow_lan_access", s.prefs.lan)
                 })
             }
             putJsonArray("outbounds") {
@@ -512,6 +515,9 @@ object Compiler {
         (homeSubnets(s) + TAILNET).any { within(d.ip, it) } || Filters.byName(d) && tsDomains.any { d.ip.endsWith(".$it") } -> TS_TAG
         else -> null
     }
+
+    /** The Tailscale exit node the engine runs for [s]: of its first active route that isn't [blocked] (one at a time). */
+    fun tsExit(s: Setup, blocked: Set<String>) = s.activeRoutes.firstNotNullOfOrNull { r -> r.tsExit?.takeIf { r.id !in blocked } }
 
     /** Networks to send through the home tunnel: its private AllowedIPs; else the interface's own subnet. */
     fun homeCidrs(p: WgPeer): List<String> = p.allowedIps.mapNotNull(::canonical).filter(::isPrivate).distinct().ifEmpty {
