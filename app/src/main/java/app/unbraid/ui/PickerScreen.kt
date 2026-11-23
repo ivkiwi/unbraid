@@ -506,7 +506,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             // Via: this route's tunnel goes through another route first. Saved at once, apart from the location.
             // Also shown for a Via the route can no longer use (it changed protocol, say), so it can always be cleared.
             if (route != null && (route.via != null || route.wg != null || !route.imported && route.loc.protocol?.startsWith("openvpn") != true)) {
-                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null }
+                val entries = setup.routes.filter { it.id != route.id && it.via == null && !it.meshExit }
                 fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
                 Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
                     val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }

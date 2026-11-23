@@ -495,7 +495,7 @@ data class Setup(
 
     /**
      * Why [r]'s Via can't be used, or null when it can (or it has none): the entry must be another route that goes
-     * straight to its server and isn't a Tailscale exit, and [r] itself a WireGuard route.
+     * straight to its server and isn't a Tailscale or NetBird exit, and [r] itself a WireGuard route.
      */
     fun viaProblem(r: Route): String? {
         val v = r.via ?: return null
@@ -503,10 +503,11 @@ data class Setup(
         return when {
             e.id == r.id || e.via != null -> "${r.name} can go through a route that goes straight to its server only"
             e.tsExit != null -> "${r.name} can't go through a Tailscale exit node"
+            e.nbExit != null -> "${r.name} can't go through a NetBird exit node"
             r.viaNative && (r.imported || e.imported || e.loc.provider != r.loc.provider || Providers.get(r.loc.provider)?.nativeHop != true) -> "One-tunnel multi-hop needs two routes of the same provider that offers it"
             r.viaNative && e.loc.countryCode != null && e.loc.countryCode == r.loc.countryCode -> "${r.name} and its entry must be in different countries for ${Providers.get(r.loc.provider)?.name}'s multi-hop"
             e.ss?.plugin != null -> "${r.name} can't go through a Shadowsocks server with a plugin"
-            r.ovpn != null || r.ss != null || r.tsExit != null || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
+            r.ovpn != null || r.ss != null || r.meshExit || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
             // Its sign-up talks to the exit server itself, which would see the phone's address.
             !r.imported && Providers.get(r.loc.provider)?.viaUnsafe == true -> "${Providers.get(r.loc.provider)?.name} routes can't use Via: setting one up contacts its server directly"
             // A name would be looked up outside the entry, telling the local network where the tunnel goes.

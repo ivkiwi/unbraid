@@ -915,6 +915,11 @@ class CompilerTest {
         // An imported server on IPv6 can't be reached through the entry, which carries IPv4 only.
         val v6 = Route("v6", wg = WgPeer("v6", "k", listOf("10.0.0.2/32"), "p", endpoint = "[2001:db8::1]:51820", allowedIps = listOf("0.0.0.0/0")), via = "a")
         assertEquals("v6 needs an IPv4 server address to go through another route", s.copy(routes = s.routes + v6).viaProblem(v6))
+        // A NetBird exit is never an entry and never goes through one, as a Tailscale exit.
+        val nb = s.copy(routes = s.routes + Route("n", nbExit = "exit-home", nbName = "box"))
+        val viaNb = s.route("b")!!.copy(via = "n")
+        assertEquals("${viaNb.name} can't go through a NetBird exit node", nb.viaProblem(viaNb))
+        assertEquals("Via works for WireGuard routes only", nb.viaProblem(Route("n2", nbExit = "exit-home", via = "a")))
         // The limit sheet offers no shared server for a Via of that provider: a route and its entry would meet there.
         assertTrue(java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText().contains("takeIf { a -> !paired && UnbraidVpn.running"))
         // Saved in a format older builds refuse: they would send b straight to its server.
