@@ -121,10 +121,10 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     }
     // No tunnel (its provider gave no server, or its own server has no keys).
     fun missing(id: String) = on && id !in vpn.servers
-    // No tunnel, a failed check, a Tailscale exit without Tailscale or whose device is offline, or a NetBird exit while NetBird failed.
+    // No tunnel, a failed check, a Tailscale exit without Tailscale or whose device is offline, or a NetBird exit the engine runs while NetBird failed.
     fun failing(id: String) = on && (missing(id) || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         setup.route(id)?.takeIf { it.tsExit != null }?.let { tsDown || exit(it) == false } == true ||
-        setup.route(id)?.nbExit != null && vpn.nb?.state == "failed")
+        setup.route(id)?.let { app.unbraid.ui.nbFailed(vpn, it) } == true)
     // Only websites whose rule applies count, as in the engine.
     val applied = app.unbraid.data.Sites.applied(setup, reported = vpn.tsSuffix)
     fun row(id: String): WidgetRoute? {

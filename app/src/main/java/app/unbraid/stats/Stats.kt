@@ -186,7 +186,7 @@ object Stats {
         val id = r?.let(::idOf) ?: routeId
         when {
             r != null -> Exit(id, r.code, r.name, r.hue, via(r))
-            id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.tailscale }, "NetBird".takeIf { setup.netbird }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
+            id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.home.tailscale }, "NetBird".takeIf { setup.home.netbird && setup.home.netbirdReady }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
             id.startsWith(SpeedTest.NODE) -> Exit(id, "TS", UnbraidVpn.state.value.tsExitNodes.firstOrNull { SpeedTest.NODE + it.ip == id }?.name ?: id.removePrefix(SpeedTest.NODE), -1, "Tailscale")
             else -> null
         }?.let { labels[id] = it }

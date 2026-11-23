@@ -92,7 +92,7 @@ class OlderBackupsTest {
             val opened = runCatching { Backup.read(files[c.getValue("file").jsonPrimitive.int]) }.getOrElse { failed += "$name: refused (${it.message})"; continue }
             val got = phone.restoredFrom(opened.setup, c.str("keepAs"), now, opened.keys) ?: run { failed += "$name: no room"; continue }
             val was = json.decodeFromJsonElement(Setup.serializer(), c.getValue("expected"))
-            // These were recorded with format 3; a restore always gives the current one, which only a NetBird route changes when saved.
+            // These were recorded with format 3; a restore always gives the current one, which only a NetBird route or a Via changes when saved.
             val expected = intended(was, opened.setup, phone).also { if (it != was) refilled++ }.copy(version = VERSION)
             if (got.version != VERSION) failed += "$name: restored as version ${got.version}"
             val known = (opened.setup.routes + phone.routes).map { it.id }.toSet() + (opened.setup.servers + phone.servers).map { it.id }

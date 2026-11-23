@@ -370,6 +370,8 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
         assertTrue(vpn.contains("tsLoginPending, move, store.setup.value.home.nbAccount) { blockedKin(it) }"))
+        // A NetBird account gone since is applied at once, not once another route's provider answers.
+        assertTrue(vpn.contains("val stopNow = staleNb() ||"))
         // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
         assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))

@@ -392,7 +392,8 @@ object Compiler {
                     require(validWgKey(s.home.nbPrivateKey!!)) { "Invalid NetBird key. Sign out of NetBird in Settings and sign in again." }
                     put("private_key", s.home.nbPrivateKey)
                     put("hostname", "unbraid")
-                    s.nbExit?.let { put("exit_node", it) }
+                    // From the routes that passed the checks, as the one-node check above: a blocked one names no node.
+                    active.firstNotNullOfOrNull { it.nbExit }?.let { put("exit_node", it) }
                 })
             }
             putJsonArray("outbounds") {

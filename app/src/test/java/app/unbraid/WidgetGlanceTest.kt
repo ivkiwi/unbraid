@@ -163,6 +163,8 @@ class WidgetGlanceTest {
         assertTrue(nb(VpnState(Phase.On, servers = runs, nb = app.unbraid.vpn.NbStatus("failed", error = "x"))).let { it.failing && !it.working })
         // Edited to another exit, not applied yet: the running one's status says nothing of it.
         assertTrue(nb(VpnState(Phase.On, servers = runs, nb = st("running")), saved("exit-b")).let { !it.working && !it.failing })
+        // Nor is a NetBird failure: the engine still runs the other exit (Routes says the same, nbFailed).
+        assertTrue(nb(VpnState(Phase.On, servers = runs, nb = app.unbraid.vpn.NbStatus("failed", error = "x")), saved("exit-b")).let { !it.failing })
         assertTrue(nb(VpnState(Phase.On, servers = mapOf("nl" to srv), nb = st("running"))).failing) // no tunnel: NetBird not signed in
     }
 

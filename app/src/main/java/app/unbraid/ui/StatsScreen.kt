@@ -1403,7 +1403,7 @@ private fun MlabConsent(dismiss: () -> Unit, accept: () -> Unit) {
             Text("Speed tests use M-Lab", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
             listOf(
                 Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test asks for one of its servers in the route's country; for your own servers and Tailscale nodes M-Lab picks a nearby one. Ten seconds each way.",
-                Icons.history to "M-Lab publishes every test's results openly and keeps them, with the public IP address of the route you test: a VPN server's, or your home's for a home or Tailscale route.",
+                Icons.history to "M-Lab publishes every test's results openly and keeps them, with the public IP address of the route you test: a VPN server's, or your home's for a home, Tailscale or NetBird route.",
                 Icons.block to "Also sent: the time, the app's name and version, and the route's country when it's known. When routes are tested together, each test server is told how many. Nothing about your phone or accounts. Up to ${SpeedTest.PER_DAY} tests a day.",
             ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
             LinkButton(Icons.external, "M-Lab privacy policy") { context.openUrl("https://www.measurementlab.net/privacy/") }

@@ -155,8 +155,9 @@ internal fun dropLabel(draft: String, removes: Boolean) = if (removes) "Remove r
  * the service stopped moving because no server works on this network ([stalled]), or an own server whose internet check
  * fails ([notAnswering]); null when none.
  */
-internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null) = when {
+internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null, nbFailed: Boolean = false) = when {
     offline != null -> "$offline is offline: its apps have no internet. Tap to choose another exit."
+    nbFailed -> "NetBird couldn't connect: its apps have no internet. Check NetBird in Settings."
     stalled -> "Doesn't work on this network"
     // Own servers only: a provider's downloaded file (PureVPN's, unused for a while) may simply have expired.
     notAnswering -> "Not answering. If this file came from a provider, it may have expired: download a new one."
@@ -351,7 +352,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
             Screen(
                 state = scroll,
                 overline = "",
-                overlineContent = { Status(vpn, switching != null, setup.activeRoutes.count { offlineExit(vpn, it) != null }) },
+                overlineContent = { Status(vpn, switching != null, setup.activeRoutes.count { offlineExit(vpn, it) != null || nbFailed(vpn, it) }) },
                 title = if (switching != null) "Switching" else when (vpn.phase) {
                     Phase.On -> if (setup.directOnly) "Connected" else "Protected"
                     Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
@@ -445,8 +446,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live, setup.routes) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
-                        exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
-                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }),
+                        exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null && !nbFailed(vpn, route) }?.let { it to pendingOf(it) },
+                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, lit && nbFailed(vpn, route)),
                     ) { sheet = shown.defaultRoute } }
                 }
                 // Android refused the VPN: most often another VPN app holds Always-on.
@@ -470,8 +471,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(),
-                        exit = if (route == null || offlineExit(vpn, route) != null) null else exitOf(id)?.let { it to pendingOf(it) },
-                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }), blocked = id == BLOCK,
+                        exit = if (route == null || offlineExit(vpn, route) != null || nbFailed(vpn, route)) null else exitOf(id)?.let { it to pendingOf(it) },
+                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, lit && nbFailed(vpn, route)), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
@@ -674,6 +675,12 @@ private fun SheetAction(text: String, color: Color = Ink.text, onClick: () -> Un
  */
 internal fun offlineExit(vpn: VpnState, r: Route?) = r?.tsExit?.takeIf { vpn.tsState == "Running" && vpn.servers[r.id]?.host == it }
     ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.takeIf { !it.online }
+
+/**
+ * Route [r] runs through a NetBird exit node in the engine now while NetBird reports it failed (a refused sign-in): its
+ * apps get no internet. Not from a node's online flag: a working peer may connect only on its first packet.
+ */
+internal fun nbFailed(vpn: VpnState, r: Route?) = r?.nbExit != null && vpn.servers[r.id]?.host == r.nbExit && vpn.nb?.state == "failed"
 
 /** The header line while connected: how long, or how many routes wait for their exit device ([waiting]). */
 internal fun connectedLabel(elapsed: String, waiting: Int) = if (waiting == 0) "Connected · $elapsed" else "Connected · ${if (waiting == 1) "1 route" else "$waiting routes"} waiting"

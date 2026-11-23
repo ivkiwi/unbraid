@@ -28,6 +28,9 @@ git -C "$WORK/netbird" checkout -q -f $NB_PIN && git -C "$WORK/netbird" clean -q
 [ "$(git -C "$WORK/netbird" rev-parse HEAD)" = $NB_PIN ] || { echo "netbird checkout is not v0.83.1"; exit 1; }
 git -C "$WORK/netbird" apply "$ROOT"/tools/netbird-*.patch
 # Relative: an absolute path would end up in the built engine and differ between machines.
+# The circl fork is NetBird's (its Rosenpass needs it) and replaces circl for the whole engine, IVPN's Kyber-1024 too:
+# the same Round 3 Kyber, but from before circl's KyberSlash fix (a division by q when compressing takes variable time).
+# Each IVPN key pair decapsulates once, at a sign-in or a key change.
 go mod edit -replace github.com/netbirdio/netbird=../netbird \
   -replace github.com/cloudflare/circl=codeberg.org/cunicu/circl@v0.0.0-20230801113412-fec58fc7b5f6 \
   -replace github.com/mailru/easyjson=github.com/netbirdio/easyjson@v0.9.0

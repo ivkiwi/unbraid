@@ -84,6 +84,11 @@ class CompilerTest {
         assertEquals(Compiler.NB_TAG, ep.str("tag")); assertEquals("https://nb.example.org", ep.str("management_url")); assertEquals("SETUP-KEY", ep.str("setup_key"))
         // The device key comes from the app's sealed setup; NetBird gets no file to keep it in.
         assertEquals(key, ep.str("private_key")); assertNull(ep["config_path"]); assertEquals("exit-home", ep.str("exit_node"))
+        // A blocked NetBird route (a Via it can't use) never names the node: the one that runs does.
+        val blockedFirst = s.copy(routes = listOf(Route("nbA", nbExit = "exit-a", nbName = "a")) + s.routes, apps = s.apps + ("com.a" to "nbA"))
+        val runs = Json.parseToJsonElement(Compiler.compile(Compiler.Input(blockedFirst, links(blockedFirst) - "nbA", "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blocked = setOf("nbA"),
+            nbNetworks = listOf("100.101.0.0/16"), nbNames = listOf("box.netbird.selfhosted.")))).jsonObject
+        assertEquals("exit-home", runs["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it.str("type") == "netbird" }.str("exit_node"))
         // Private networks only, before the tailnet's rule; a public routed network never captures internet traffic.
         val rules = c.rules()
         val nbRule = rules.indexOfFirst { it["outbound"]?.jsonPrimitive?.content == Compiler.NB_TAG && "ip_cidr" in it }
@@ -922,8 +927,9 @@ class CompilerTest {
         assertEquals("Via works for WireGuard routes only", nb.viaProblem(Route("n2", nbExit = "exit-home", via = "a")))
         // The limit sheet offers no shared server for a Via of that provider: a route and its entry would meet there.
         assertTrue(java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText().contains("takeIf { a -> !paired && UnbraidVpn.running"))
-        // Saved in a format older builds refuse: they would send b straight to its server.
-        assertEquals(4, s.stamped.version)
+        // Saved in a format older builds refuse: they would send b straight to its server. 5, not upstream's 4: the NetBird
+        // builds before Via read 4 as their own format.
+        assertEquals(app.unbraid.data.VERSION, s.stamped.version)
         assertEquals(2, s.copy(routes = s.routes.map { it.copy(via = null) }, version = app.unbraid.data.VERSION).stamped.version)
         // PIA sets its key up with the server itself; a WireGuard config naming its server by host name; a Shadowsocks plugin entry.
         val pia = s.copy(routes = listOf(s.routes[0], Route("b", Location("pia", country = "Germany"), via = "a")))

@@ -250,8 +250,9 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
 /**
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
- * 4: Via routes, which an older build would send straight to their server; only a setup that has one is saved as 4.
- * 5: NetBird exit routes, which an older build would take for provider routes; only a setup that has one is saved as 5.
+ * 4: Via routes, which an older build would send straight to their server (upstream; this build saves them as 5).
+ * 5: NetBird exit routes, which an older build would take for provider routes, and Via routes, which the NetBird builds
+ * before them read as their own format 4 and would send straight to their server; only a setup with either is saved as 5.
  */
 const val VERSION = 5
 
@@ -532,14 +533,14 @@ data class Setup(
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
     /**
-     * As saved: format 5 only with a NetBird exit route, format 4 only with a Via somewhere, format 3 only with a website route or a Block, so a setup without
-     * them still opens in a build from before them. An older build would drop them: send a Via route straight to its
+     * As saved: format 5 only with a NetBird exit route or a Via somewhere, format 3 only with a website route or a Block,
+     * so a setup without them still opens in a build from before them. An older build would drop them: send a Via route straight to its
      * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
-    // The lowest version that reads it right: an app older than NetBird routes would take one for a provider route.
+    // The lowest version that reads it right: an app older than NetBird routes would take one for a provider route, and
+    // a NetBird build older than Via reads format 4 as its own and drops the Via.
     val stamped get() = copy(version = when {
-        routes.any { it.nbExit != null } -> VERSION
-        routes.any { it.via != null } -> 4
+        routes.any { it.nbExit != null || it.via != null } -> VERSION
         (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
         else -> 3
     })

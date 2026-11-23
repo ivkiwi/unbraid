@@ -832,7 +832,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
             // And an app or the default moved onto a Via route still waiting: blocked meanwhile, not left on its old route.
             // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
-            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
+            // And a NetBird account signed out of or replaced: its engine never serves the home network meanwhile.
+            val stopNow = staleNb() || ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
                 ready.blocked.keys.any { id -> setup.route(id)?.via != null && (id in links || applied?.let { LinkPicker.movedOnto(it, setup, id) } == true) } ||
                 links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via || plain(setup, id) } ||
                 !LinkPicker.stillSuits(setup, links, Providers::get) // also a running tunnel left out of [keep] by a health move

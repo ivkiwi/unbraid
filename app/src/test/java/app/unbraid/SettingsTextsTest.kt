@@ -25,6 +25,16 @@ class SettingsTextsTest {
         assertEquals("tls://dns.corp.example · through Tailscale", line("tls://dns.corp.example", app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")))
         assertEquals("tls://dns.example.org", line("tls://dns.example.org"))
         assertEquals("nonsense · not encrypted", line("nonsense"))
+        // A server in NetBird's network: through NetBird with its home toggle on, else that toggle is what it needs.
+        val nb = app.unbraid.vpn.NbStatus(state = "running", network = "100.101.0.0/16")
+        fun nbLine(home: Boolean, exit: Boolean = true) = app.unbraid.ui.ownDnsSub(app.unbraid.data.Setup(
+            home = app.unbraid.data.Home(netbird = home, nbManagementUrl = "https://nb.example.org", nbPrivateKey = "k"),
+            routes = listOfNotNull(app.unbraid.data.Route("nbx", nbExit = "exit-home").takeIf { exit }), defaultRoute = if (exit) "nbx" else app.unbraid.data.DIRECT,
+            prefs = app.unbraid.data.Prefs(filter = Filter(app.unbraid.data.Filters.OWN, "100.101.0.53"))), nb)
+        assertEquals("100.101.0.53 · through NetBird", nbLine(true))
+        assertEquals("100.101.0.53 · needs Reach your NetBird network on, under NetBird", nbLine(false))
+        // Signed in with home access off and no exit route: still NetBird's toggle, not the tailnet's.
+        assertEquals("100.101.0.53 · needs Reach your NetBird network on, under NetBird", nbLine(false, exit = false))
     }
 
     @Test fun firstChoiceSwitchesVpnRoutesOn() {

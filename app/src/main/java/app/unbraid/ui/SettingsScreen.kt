@@ -134,12 +134,16 @@ internal fun filterChosen(f: app.unbraid.data.Filter, id: String, value: String 
  * The own DNS server's line: what was typed, then how it is reached when it lives at home (or what that still needs),
  * else that a plain address isn't encrypted.
  */
-internal fun ownDnsSub(s: app.unbraid.data.Setup): String {
+internal fun ownDnsSub(s: app.unbraid.data.Setup, nb: app.unbraid.vpn.NbStatus? = null): String {
     val d = s.prefs.filter.server()
-    val via = d?.let { app.unbraid.vpn.Compiler.homeVia(s, it) }
+    // NetBird's networks and peer names as the engine gets them ([app.unbraid.vpn.Compiler.compile]), with or without its home toggle.
+    val (nbNets, nbNames) = nb?.takeIf { s.home.netbirdReady }?.let { app.unbraid.vpn.Compiler.nbUsed(it.networks, it.names) } ?: (emptyList<String>() to emptyList())
+    val via = d?.let { if (s.home.netbird) app.unbraid.vpn.Compiler.homeVia(s, it, nbNets = nbNets, nbNames = nbNames) else app.unbraid.vpn.Compiler.homeVia(s, it) }
     return s.prefs.filter.value + when {
         via == app.unbraid.vpn.Compiler.TS_TAG -> " · through Tailscale"
+        via == app.unbraid.vpn.Compiler.NB_TAG -> " · through NetBird"
         via != null -> " · through your home tunnel"
+        d != null && !s.home.netbird && app.unbraid.vpn.Compiler.homeVia(s, d, nbNets = nbNets, nbNames = nbNames) == app.unbraid.vpn.Compiler.NB_TAG -> " · needs Reach your NetBird network on, under NetBird"
         d != null && app.unbraid.vpn.Compiler.homeVia(s.copy(home = s.home.copy(tailscale = true)), d) != null -> " · needs Reach your tailnet on, under Tailscale"
         d?.tls == null && d?.path == null -> " · not encrypted"
         else -> ""
@@ -244,6 +248,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val home = setup.home
     var stack by rememberSaveable { mutableStateOf(path) } // survives the app being killed behind a file picker
     val tsStored by ui.tsStored.collectAsStateWithLifecycle()
+    // NetBird's saved map (sealed: read and decrypted once per account, not on every recomposition).
+    val nbSaved = remember(home.nbAccount) { app.unbraid.vpn.NbStatus.parse(app.unbraid.Unbraid.store.nbMap(home.nbAccount)) }
     LaunchedEffect(stack, setup.tailscale) { ui.checkTailscale() } // a node left behind can be signed out of
     val page = stack.lastOrNull()
     val go = { p: String -> stack = stack + p; path = stack }
@@ -582,7 +588,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     val on = filter.id == d.id
                     Item(d.name, d.blocks + if (d.id == "nextdns") " · profile ${if (on) filter.value.ifBlank { "not set" } else "needed"}" else "",
                         { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { filterChosen(it, d.id) } }, selected = on) { Radio(on) }
-                } + Item("Own DNS server", if (filter.id == app.unbraid.data.Filters.OWN) ownDnsSub(setup) else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
+                } + Item("Own DNS server", if (filter.id == app.unbraid.data.Filters.OWN) ownDnsSub(setup, vpn.nb?.takeIf { it.networks.isNotEmpty() } ?: nbSaved) else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
                     { dialog = "filter:own" }, selected = filter.id == app.unbraid.data.Filters.OWN) { Radio(filter.id == app.unbraid.data.Filters.OWN) })
                 if (filterDns != null) {
                     val providers = signedIn.mapNotNull { pr -> pr.protection?.takeIf { setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" }?.label }
